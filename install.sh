@@ -1,27 +1,30 @@
 #!/bin/bash
 # claude-review-inbox を入れる・外す。何回実行しても結果は同じになる。
-# 使い方: ./install.sh [--with-local] [--with-schedule | --no-schedule] [--dry-run] [--uninstall]
-#   --with-local     作成者の環境用の連携部分（local/skills/*）と、その3つの定期実行も入れる。棚卸し（review-loop のスキルと定期実行）は入れない
-#   --with-schedule  週1回の棚卸し（review-loop）を聞かずに登録する
-#   --no-schedule    棚卸しを登録しない（登録済みなら外す）
-#   --dry-run     何も変えず、行う操作を表示する
+# 使い方: ./install.sh [--with-schedule | --no-schedule] [--yes] [--dry-run] [--uninstall]
+#   --with-schedule  週1回の見直し（memory-audit・feedback-mining・skill-audit）を聞かずに登録する
+#   --no-schedule    週1回の見直しを登録しない（登録済みなら外す）
+#   --yes            足りないもの（Xcode のコマンドラインツール・Homebrew・terminal-notifier）を聞かずに入れる。
+#                    見回りの範囲は聞かずに「書類・デスクトップ・ダウンロードを入れない、リポジトリを見回らない」とする
+#   --dry-run     何も変えず、必要なものの確認の結果・聞く内容・行う操作を表示する
 #   --uninstall   launchd から外し、このリポジトリを指すリンクと足したフックを消す
 # 環境変数:
 #   CLAUDE_REVIEW_LABEL   launchd のラベル（既定 com.<ユーザー名>.claude-review-inbox。ユーザー名のドットはハイフンに置き換える）
 #   CLAUDE_REVIEW_PORT    画面のポート（既定 8010）
-#   CLAUDE_REVIEW_PYTHON  サーバーを動かす Python（既定 /usr/bin/python3）
-#   CLAUDE_REVIEW_LOOP_WEEKDAY / _HOUR / _MINUTE  棚卸しの曜日・時・分（既定 1 / 10 / 0。毎週月曜 10:00）
-#   CLAUDE_REVIEW_LOOP_MODEL / _EFFORT            棚卸しの claude に渡す --model / --effort（既定は付けない）
+#   CLAUDE_REVIEW_PYTHON  サーバーを動かす Python 3.9 以上（既定 /usr/bin/python3。Xcode のコマンドラインツールが必要）
+#   XDG_CONFIG_HOME       見回りの範囲の設定ファイル（<XDG_CONFIG_HOME>/claude-review-inbox/patrol.conf）の置き場所（既定 ~/.config）
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd -P)"
-with_local=0
 dry_run=0
 uninstall=0
+assume_yes=0
 schedule_opt=""
 for arg in "$@"; do
   case "$arg" in
-    --with-local) with_local=1 ;;
+    --with-local)
+      printf 'ERROR: --with-local は不要になりました。付けずに実行してください\n' >&2
+      exit 2
+      ;;
     --dry-run) dry_run=1 ;;
     --uninstall) uninstall=1 ;;
     --with-schedule|--no-schedule)
@@ -31,35 +34,42 @@ for arg in "$@"; do
       fi
       schedule_opt="$arg"
       ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --yes) assume_yes=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) printf 'ERROR: 不明な引数です: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
-
-if [ "$with_local" -eq 1 ] && [ ! -d "$REPO/local/skills" ]; then
-  printf 'ERROR: この版には local がありません。本体だけを入れる場合は --with-local を外してください\n' >&2
-  exit 2
-fi
 
 user_name="$(id -un)"
 uid="$(id -u)"
 LABEL="${CLAUDE_REVIEW_LABEL:-com.${user_name//./-}.claude-review-inbox}"
 PORT="${CLAUDE_REVIEW_PORT:-8010}"
-PYTHON="${CLAUDE_REVIEW_PYTHON:-/usr/bin/python3}"
+SYSTEM_PYTHON="${CLAUDE_REVIEW_SYSTEM_PYTHON:-/usr/bin/python3}"
+PYTHON="${CLAUDE_REVIEW_PYTHON:-$SYSTEM_PYTHON}"
+# 必要なものを探す場所。CLAUDE_REVIEW_XCODE_SELECT・_BREW_PATHS・_CLAUDE_PATHS・_BREW_INSTALLER・_SYSTEM_PYTHON は検査用。
+XCODE_SELECT="${CLAUDE_REVIEW_XCODE_SELECT:-xcode-select}"
+BREW_PATHS="${CLAUDE_REVIEW_BREW_PATHS-/opt/homebrew/bin/brew /usr/local/bin/brew}"
+CLAUDE_PATHS="${CLAUDE_REVIEW_CLAUDE_PATHS-$HOME/.local/bin/claude $HOME/.claude/local/claude /opt/homebrew/bin/claude /usr/local/bin/claude}"
+BREW_INSTALLER="${CLAUDE_REVIEW_BREW_INSTALLER:-}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_DIR="$HOME/.local/state/claude-review-inbox"
 PROPOSALS_DIR="$HOME/claude-reports/proposals"
-HOOK_CMD="$REPO/core/hooks/session-start.sh"
+# SessionStart フックに登録するコマンド。report-inbox の件数の1行と、2つの見回りの起動である。
+HOOK_CMDS=("$REPO/core/skills/report-inbox/scripts/unread.sh"
+  "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
+  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh")
+# 旧版が登録したフック（スクリプトは削除済み）。report-inbox の unread.sh と同じ件数を出すため、見つけたら外す。
+LEGACY_HOOK_CMD="$REPO/core/hooks/session-start.sh"
+# 見回りの範囲の設定ファイル。repo-patrol と secret-patrol が読む。
+PATROL_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/claude-review-inbox/patrol.conf"
 TS="$(date '+%Y%m%d-%H%M%S')"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 # install.sh が登録した定期実行の台帳。1行に「ジョブ名<TAB>ラベル<TAB>plist<TAB>引き継いだなら1」。
 JOBS_FILE="$STATE_DIR/scheduled-jobs.tsv"
 LABEL_PREFIX="com.${user_name//./-}"
-LOOP_WEEKDAY="${CLAUDE_REVIEW_LOOP_WEEKDAY:-1}"
-LOOP_HOUR="${CLAUDE_REVIEW_LOOP_HOUR:-10}"
-LOOP_MINUTE="${CLAUDE_REVIEW_LOOP_MINUTE:-0}"
-# local の定期実行: <ジョブ名>:<起動スクリプト>
-LOCAL_JOBS="memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh"
+# 週1回の見直しの定期実行: <ジョブ名>:<起動スクリプト>。repo-patrol と secret-patrol は SessionStart フックで動くため含めない。
+SCHEDULE_JOBS="memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh"
+SCHEDULE_QUESTION="週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか。claude の利用枠を使います [y/N]"
 
 info() { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -100,9 +110,21 @@ real_path() {
   fi
 }
 
-# 設定ディレクトリ: ~/.claude と、存在すれば ~/.claude2。
+# 設定ディレクトリの一覧。定期実行のスクリプトと同じく、環境変数 CLAUDE_REVIEW_CONFIG_DIRS、
+# 共通の設定ファイル（jobs.conf）、既定の ~/.claude の順に決める（コロン区切り。先頭の ~ を展開する）。
+# 2つ目の設定ディレクトリを使う場合は、jobs.conf に書く。存在しないものは使わない（~/.claude は常に含める）。
+JOBS_CONF="${CLAUDE_REVIEW_JOBS_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-review-inbox/jobs.conf}"
+config_list="${CLAUDE_REVIEW_CONFIG_DIRS:-}"
+if [ -z "$config_list" ] && [ -f "$JOBS_CONF" ]; then
+  config_list="$(sed -n 's/^CLAUDE_REVIEW_CONFIG_DIRS=//p' "$JOBS_CONF" | tail -n 1)"
+fi
 config_dirs=("$HOME/.claude")
-[ -d "$HOME/.claude2" ] && config_dirs+=("$HOME/.claude2")
+IFS=: read -r -a config_items <<<"$config_list"
+for c in ${config_items[@]+"${config_items[@]}"}; do
+  case "$c" in '~'*) c="$HOME${c#\~}" ;; esac
+  c="${c%/}"
+  [ -n "$c" ] && [ -d "$c" ] && [ "$c" != "$HOME/.claude" ] && config_dirs+=("$c")
+done
 
 # スキル置き場の実体を、重複を除いて並べる。
 skill_dirs=()
@@ -136,14 +158,7 @@ done
 
 # 入れるスキルの元のディレクトリ。
 skill_sources=()
-# --with-local のときは review-loop を入れない。local の3つが同じ役目を持ち、一覧に残ると選び間違えるためである。
-for s in "$REPO"/core/skills/*/; do
-  [ "$with_local" -eq 1 ] && [ "$(basename "$s")" = "review-loop" ] && continue
-  skill_sources+=("${s%/}")
-done
-if [ "$with_local" -eq 1 ]; then
-  for s in "$REPO"/local/skills/*/; do skill_sources+=("${s%/}"); done
-fi
+for s in "$REPO"/core/skills/*/; do skill_sources+=("${s%/}"); done
 
 # 登録済みなら launchd から外す。--dry-run では launchctl を一切呼ばず、行う操作だけを表示する。
 # 引数: [ラベル]（省略時はサーバーのラベル）
@@ -158,46 +173,117 @@ bootout_if_registered() {
   fi
 }
 
+# settings.json の SessionStart フックを Python（標準ライブラリの json）で調べ・書き換える。
+# 引数: <has|add|remove> <コマンド> <settings.json（add で新規なら空）> [<書き出し先>]
+# 書かれたコマンドが同じ文字列か、~ と環境変数を展開してリンクを解決した先が同じファイルなら、同じフックとみなす。
+# 既に手で登録したもの（スキル置き場を経由したパスなど）と二重に登録しないためである。
+hook_json() {
+  "$PYTHON" -B - "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, os, sys
+mode, cmd, src, dest = sys.argv[1:5]
+cmd_real = os.path.realpath(cmd)
+def entries(d):
+    h = d.get("hooks")
+    s = h.get("SessionStart") if isinstance(h, dict) else None
+    return s if isinstance(s, list) else []
+def is_ours(x):
+    if not isinstance(x, dict):
+        return False
+    c = x.get("command")
+    if not isinstance(c, str):
+        return False
+    if c == cmd:
+        return True
+    p = os.path.expandvars(os.path.expanduser(c.strip()))
+    return os.path.isabs(p) and os.path.realpath(p) == cmd_real
+def inner(e):
+    hs = e.get("hooks") if isinstance(e, dict) else None
+    return hs if isinstance(hs, list) else []
+if mode == "add" and not src:
+    data = {}
+else:
+    try:
+        with open(src, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        sys.exit(1)
+    if not isinstance(data, dict):
+        sys.exit(1)
+if mode == "has":
+    sys.exit(0 if any(is_ours(x) for e in entries(data) for x in inner(e)) else 1)
+if mode == "add":
+    if not isinstance(data.get("hooks"), dict):
+        data["hooks"] = {}
+    data["hooks"]["SessionStart"] = entries(data) + [{"hooks": [{"type": "command", "command": cmd}]}]
+else:
+    # 足したフックだけを除き、空になった要素と配列を消す。他の設定は変えない。
+    kept = []
+    for e in entries(data):
+        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+            e["hooks"] = [x for x in e["hooks"] if not is_ours(x)]
+            if not e["hooks"]:
+                continue
+        kept.append(e)
+    if kept:
+        data["hooks"]["SessionStart"] = kept
+    else:
+        data["hooks"].pop("SessionStart", None)
+        if not data["hooks"]:
+            del data["hooks"]
+with open(dest, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+}
+
+# 引数: <settings.json> <コマンド>
 has_hook() {
-  [ -f "$1" ] && jq -e --arg c "$HOOK_CMD" \
-    '[.hooks.SessionStart[]?.hooks[]? | select(.command == $c)] | length > 0' "$1" >/dev/null 2>&1
+  [ -f "$1" ] && hook_json has "$2" "$1" 2>/dev/null
 }
 
 # ---- フック ----
+# 書き換える前の settings.json を残す。1回の実行で複数のフックを書き換えても、最初の版だけを残す。
+backup_settings() {
+  [ -e "$1.bak-$TS" ] && return 0
+  run cp -p "$1" "$1.bak-$TS"
+}
+
+# 引数: <settings.json> <コマンド>
 add_hook() {
-  local f="$1" tmp
-  if has_hook "$f"; then
-    info "フックは登録済みです: $f"
+  local f="$1" cmd="$2" tmp
+  if has_hook "$f" "$cmd"; then
+    info "フックは登録済みです: ${f}（${cmd}）"
     return 0
   fi
   if [ -f "$f" ]; then
-    run cp -p "$f" "$f.bak-$TS"
+    backup_settings "$f"
   else
     run mkdir -p "$(dirname "$f")"
   fi
-  info "フックを足します: $f"
+  info "フックを足します: ${f}（${cmd}）"
   [ "$dry_run" -eq 1 ] && return 0
   tmp="$(mktemp "$f.tmp.XXXXXX")"
   if [ -f "$f" ]; then
-    jq --arg c "$HOOK_CMD" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{"hooks": [{"type": "command", "command": $c}]}])' "$f" >"$tmp"
+    if ! hook_json add "$cmd" "$f" "$tmp"; then
+      rm -f "$tmp"
+      warn "settings.json を JSON として読めないため、フックを足していません: $f"
+      return 0
+    fi
   else
-    jq -n --arg c "$HOOK_CMD" '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": $c}]}]}}' >"$tmp"
+    hook_json add "$cmd" "" "$tmp"
   fi
   mv -f "$tmp" "$f"
 }
 
+# 引数: <settings.json> <コマンド>
 remove_hook() {
-  local f="$1" tmp
-  has_hook "$f" || return 0
-  run cp -p "$f" "$f.bak-$TS"
-  info "フックを外します: $f"
+  local f="$1" cmd="$2" tmp
+  has_hook "$f" "$cmd" || return 0
+  backup_settings "$f"
+  info "フックを外します: ${f}（${cmd}）"
   [ "$dry_run" -eq 1 ] && return 0
   tmp="$(mktemp "$f.tmp.XXXXXX")"
-  # 足したフックだけを除き、空になった要素と配列を消す。他の設定は変えない。
-  jq --arg c "$HOOK_CMD" '
-    .hooks.SessionStart |= (map(.hooks |= map(select(.command != $c))) | map(select((.hooks | length) > 0)))
-    | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
-    | if (.hooks | length) == 0 then del(.hooks) else . end' "$f" >"$tmp"
+  hook_json remove "$cmd" "$f" "$tmp"
   mv -f "$tmp" "$f"
 }
 
@@ -257,15 +343,16 @@ check_notifier() {
     printf '[dry-run] （terminal-notifier があれば）試しの通知を出し、失敗したら open -W -a <terminal-notifier.app> で1回起動する\n'
     return 0
   fi
-  tn="$(command -v terminal-notifier 2>/dev/null)" || return 0
+  tn="$TN"
+  [ -n "$tn" ] || return 0
   if "$tn" -title "$NOTIFY_TITLE" -message "$NOTIFY_MESSAGE" >/dev/null 2>&1; then
     info "試しの通知を出しました（terminal-notifier）"
     return 0
   fi
   warn "terminal-notifier で試しの通知を出せませんでした。アプリとして1回起動して、通知の許可を求めます"
   prefix=""
-  if command -v brew >/dev/null 2>&1; then
-    prefix="$(brew --prefix terminal-notifier 2>/dev/null || true)"
+  if [ -n "$BREW" ]; then
+    prefix="$("$BREW" --prefix terminal-notifier 2>/dev/null || true)"
   fi
   app="$prefix/terminal-notifier.app"
   if [ -n "$prefix" ] && [ -d "$app" ]; then
@@ -293,12 +380,12 @@ write_plist() {
   tmp="$(mktemp "$PLIST.tmp.XXXXXX")"
   sed -e "s|@@LABEL@@|$LABEL|g" -e "s|@@PYTHON@@|$PYTHON|g" \
     -e "s|@@SERVER@@|$REPO/core/server/inbox_server.py|g" \
-    -e "s|@@PORT@@|$PORT|g" -e "s|@@STATE_DIR@@|$STATE_DIR|g" "$tmpl" >"$tmp"
+    -e "s|@@PORT@@|$PORT|g" -e "s|@@STATE_DIR@@|$STATE_DIR|g" -e "s|@@PATH@@|$LAUNCHD_PATH|g" "$tmpl" >"$tmp"
   plutil -lint "$tmp" >/dev/null
   mv -f "$tmp" "$PLIST"
 }
 
-# ---- 定期実行（棚卸しと local の3つ） ----
+# ---- 定期実行（週1回の見直しの3つ） ----
 # 台帳からジョブの行を出す。無ければ空。
 job_entry() {
   [ -f "$JOBS_FILE" ] || return 0
@@ -346,7 +433,7 @@ unregister_job() {
 # スキル置き場の <ジョブ>/scripts/<スクリプト> と、リンクを解決した実体の両方で比べる。
 find_existing_job_plist() {
   local job="$1" script="$2" want_real f arg d hit
-  want_real="$REPO/local/skills/$job/scripts/$script"
+  want_real="$REPO/core/skills/$job/scripts/$script"
   for f in "$AGENTS_DIR"/*.plist; do
     [ -f "$f" ] || continue
     arg="$(plutil -extract ProgramArguments.1 raw "$f" 2>/dev/null)" || continue
@@ -402,36 +489,10 @@ register_job() {
   set_job_entry "$job" "$label" "$plist" "$inherited"
 }
 
-is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-
-# 週1回の棚卸し（core の review-loop）を登録する。
-register_review_loop() {
-  local label="$LABEL_PREFIX.review-loop" plist tmp="" k v
-  plist="$AGENTS_DIR/$label.plist"
-  if ! is_uint "$LOOP_WEEKDAY" || ! is_uint "$LOOP_HOUR" || ! is_uint "$LOOP_MINUTE" \
-    || [ "$LOOP_WEEKDAY" -gt 7 ] || [ "$LOOP_HOUR" -gt 23 ] || [ "$LOOP_MINUTE" -gt 59 ]; then
-    warn "棚卸しの時刻の指定が正しくありません（曜日 ${LOOP_WEEKDAY}・時 ${LOOP_HOUR}・分 ${LOOP_MINUTE}）。登録しません"
-    return 1
-  fi
-  info "週1回の棚卸しを登録します（曜日 ${LOOP_WEEKDAY}、$(printf '%02d:%02d' "$LOOP_HOUR" "$LOOP_MINUTE")）"
-  if [ "$dry_run" -eq 0 ]; then
-    mkdir -p "$STATE_DIR/review-loop" "$AGENTS_DIR"
-    tmp="$(mktemp "$AGENTS_DIR/.$label.tmp.XXXXXX")"
-    sed -e "s|@@LABEL@@|$label|g" -e "s|@@SCRIPT@@|${skill_dirs[0]}/review-loop/scripts/run.sh|g" \
-      -e "s|@@WEEKDAY@@|$((10#$LOOP_WEEKDAY))|g" -e "s|@@HOUR@@|$((10#$LOOP_HOUR))|g" -e "s|@@MINUTE@@|$((10#$LOOP_MINUTE))|g" \
-      -e "s|@@STATE_DIR@@|$STATE_DIR|g" "$REPO/core/launchd/review-loop.plist.template" >"$tmp"
-    for k in MODEL EFFORT; do
-      v="$(eval "printf '%s' \"\${CLAUDE_REVIEW_LOOP_$k:-}\"")"
-      [ -z "$v" ] || plutil -insert "EnvironmentVariables.CLAUDE_REVIEW_LOOP_$k" -string "$v" "$tmp"
-    done
-  fi
-  register_job review-loop "$label" "$plist" 0 "$tmp"
-}
-
-# local の定期実行を1つ登録する。既存の plist が同じスクリプトを別のラベルで指していれば、そのラベルを引き継ぐ。
-register_local_job() {
+# 週1回の見直しの定期実行を1つ登録する。既存の plist が同じスクリプトを別のラベルで指していれば、そのラベルを引き継ぐ。
+register_schedule_job() {
   local job="$1" script="$2" tmpl label plist inherited=0 found tmp=""
-  tmpl="$REPO/local/skills/$job/launchd/$job.plist.template"
+  tmpl="$REPO/core/skills/$job/launchd/$job.plist.template"
   [ -f "$tmpl" ] || { warn "plist のひな形がありません: $tmpl"; return 1; }
   label="$LABEL_PREFIX.$job"
   plist="$AGENTS_DIR/$label.plist"
@@ -455,26 +516,266 @@ register_local_job() {
   register_job "$job" "$label" "$plist" "$inherited" "$tmp"
 }
 
+# ---- 見回りの範囲 ----
+PATROL_Q_PERSONAL="書類・デスクトップ・ダウンロードのフォルダを、個人情報の置き忘れの見回りに入れますか。初めて見回るときに、macOS がフォルダへのアクセスの許可を求めます [y/N]"
+PATROL_Q_REPOS="手元のリポジトリを置いているフォルダを入力してください（例: ~/Documents/git。空なら見回りません）"
+
+# フォルダが書類・デスクトップ・ダウンロードの下にあれば 0 を返す。先頭の ~/ は HOME として扱う。
+under_personal_folder() {
+  local p="$1" d
+  case "$p" in "~/"*) p="$HOME/${p#\~/}" ;; esac
+  for d in Documents Desktop Downloads; do
+    case "$p" in "$HOME/$d"|"$HOME/$d/"*) return 0 ;; esac
+  done
+  return 1
+}
+
+# repo-patrol と secret-patrol が読む設定ファイルを書く。既にあれば聞かずにその値を使う。
+# --yes のときは聞かずに「入れない・見回らない」とする。macOS の許可を勝手に増やさないためである。
+setup_patrol_conf() {
+  local personal="no" roots="" ans="" r
+  if [ -f "$PATROL_CONF" ]; then
+    info "見回りの範囲は設定済みです（変えるときはこのファイルを直します）: $PATROL_CONF"
+    return 0
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    printf '[dry-run] 聞く: %s\n' "$PATROL_Q_PERSONAL"
+    printf '[dry-run] 聞く: %s\n' "$PATROL_Q_REPOS"
+    printf '[dry-run] 答えを書く: %s\n' "$PATROL_CONF"
+    return 0
+  fi
+  if [ "$assume_yes" -eq 1 ]; then
+    info "--yes のため、見回りの範囲は聞かずに「書類・デスクトップ・ダウンロードを入れない、リポジトリを見回らない」とします"
+  elif [ -t 0 ]; then
+    printf '%s ' "$PATROL_Q_PERSONAL"
+    read -r ans || ans=""
+    case "$ans" in y|Y|yes|YES) personal="yes" ;; esac
+    printf '%s: ' "$PATROL_Q_REPOS"
+    read -r roots || roots=""
+    roots="$(printf '%s' "$roots" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -n "$roots" ]; then
+      while IFS= read -r r; do
+        if [ -n "$r" ] && under_personal_folder "$r"; then
+          info "${r} は書類・デスクトップ・ダウンロードの下にあるため、初めて見回るときに macOS がフォルダへのアクセスの許可を求めます"
+        fi
+      done < <(printf '%s\n' "$roots" | tr ':' '\n')
+    fi
+  else
+    info "標準入力が端末ではないため、見回りの範囲を聞かず、設定ファイルも書きません（書類・デスクトップ・ダウンロードとリポジトリは見回りません）"
+    return 0
+  fi
+  mkdir -p "$(dirname "$PATROL_CONF")"
+  {
+    printf '# claude-review-inbox の見回りの範囲。install.sh が書いた。repo-patrol と secret-patrol が読む。\n'
+    printf '# PERSONAL_FOLDERS: yes なら書類・デスクトップ・ダウンロードを個人情報の置き忘れの見回りに入れる\n'
+    printf 'PERSONAL_FOLDERS=%s\n' "$personal"
+    printf '# REPO_ROOTS: 手元のリポジトリを置いているフォルダ。複数はコロンで区切る。空なら見回らない\n'
+    printf 'REPO_ROOTS=%s\n' "$roots"
+  } >"$PATROL_CONF"
+  info "見回りの範囲を書きました: $PATROL_CONF"
+}
+
+# ---- 必要なものの確認 ----
+TN=""
+BREW=""
+CLAUDE_BIN=""
+LAUNCHD_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# コマンドを PATH と、続けて渡した場所の順に探し、最初に見つかった実行できるパスを出す。
+find_cmd() {
+  local name="$1" p
+  shift
+  if p="$(command -v "$name" 2>/dev/null)" && [ -x "$p" ]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  for p in "$@"; do
+    if [ -f "$p" ] && [ -x "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Xcode のコマンドラインツールがあるか。/usr/bin/python3 は実行しない（無い Mac では入れる画面が開くため）。
+# Python は -B で動かす（HOME の Library/Caches にバイトコードを書かせない）。
+has_clt() {
+  local dev
+  dev="$("$XCODE_SELECT" -p 2>/dev/null)" || return 1
+  [ -n "$dev" ] && [ -x "$dev/usr/bin/python3" ]
+}
+
+# PYTHON を実行してよいか。既定の /usr/bin/python3 は、コマンドラインツールがあるときだけ実行する。
+python_usable() {
+  if [ "$PYTHON" = "$SYSTEM_PYTHON" ]; then
+    has_clt
+  else
+    [ -x "$PYTHON" ]
+  fi
+}
+
+# y/N で聞く。--yes なら聞かずに y、標準入力が端末でなければ聞かずに N とする。
+ask() {
+  local ans=""
+  [ "$assume_yes" -eq 1 ] && return 0
+  [ -t 0 ] || return 1
+  printf '%s [y/N] ' "$1"
+  read -r ans || ans=""
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# 見つかった brew・claude・terminal-notifier のフォルダを、launchd に渡す PATH の前に足す。
+build_launchd_path() {
+  local p d out=""
+  for p in "$CLAUDE_BIN" "$BREW" "$TN"; do
+    [ -n "$p" ] || continue
+    d="$(dirname "$p")"
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  LAUNCHD_PATH="$out"
+}
+
+find_brew() { BREW="$(find_cmd brew $BREW_PATHS)" || BREW=""; }
+find_tn() {
+  local extra=""
+  [ -n "$BREW" ] && extra="$(dirname "$BREW")/terminal-notifier"
+  TN="$(find_cmd terminal-notifier $extra)" || TN=""
+}
+
+check_prerequisites() {
+  local clt="" py_ok=0 py_state planned=() missing_required=0 st
+  # 1. Xcode のコマンドラインツール（既定の /usr/bin/python3 を使うときだけ必要）
+  if [ "$PYTHON" = "$SYSTEM_PYTHON" ]; then
+    if has_clt; then clt="あり"; else clt="なし"; fi
+  else
+    clt="不要（CLAUDE_REVIEW_PYTHON を指定）"
+  fi
+  # 2. Python 3.9 以上
+  if [ "$clt" = "なし" ]; then
+    py_state="未確認（Xcode のコマンドラインツールが必要）"
+  elif [ ! -x "$PYTHON" ]; then
+    py_state="なし（${PYTHON}）"
+  elif [ "$("$PYTHON" -B -c 'import sys; print(sys.version_info >= (3, 9))' 2>/dev/null)" = "True" ]; then
+    py_ok=1
+    py_state="あり（${PYTHON}）"
+  else
+    py_state="古い（${PYTHON}。3.9 以上が必要）"
+  fi
+  # 4〜6
+  find_brew
+  find_tn
+  CLAUDE_BIN="$(find_cmd claude $CLAUDE_PATHS)" || CLAUDE_BIN=""
+
+  info "必要なものの確認:"
+  printf '  %s: %s\n' "Xcode のコマンドラインツール（必須）" "$clt"
+  printf '  %s: %s\n' "Python 3.9 以上（必須）" "$py_state"
+  st="なし"; [ -n "$BREW" ] && st="あり（${BREW}）"
+  printf '  %s: %s\n' "Homebrew（任意）" "$st"
+  st="なし"; [ -n "$TN" ] && st="あり（${TN}）"
+  printf '  %s: %s\n' "terminal-notifier（任意）" "$st"
+  st="なし"; [ -n "$CLAUDE_BIN" ] && st="あり（${CLAUDE_BIN}）"
+  printf '  %s: %s\n' "claude（週1回の見直しに必要）" "$st"
+
+  # 必須のもの
+  if [ "$clt" = "なし" ]; then
+    if [ "$dry_run" -eq 1 ]; then
+      planned+=("Xcode のコマンドラインツール（xcode-select --install）")
+      missing_required=1
+    elif ask "Xcode のコマンドラインツールを入れますか。承認の画面のサーバーを動かす Python に使います"; then
+      "$XCODE_SELECT" --install || true
+      info "画面の指示で入れ終えてから、もう一度 ./install.sh を実行してください"
+      exit 2
+    else
+      info "Xcode のコマンドラインツールが無いため、承認の画面のサーバーが動きません。入れずに終了します"
+      info "入れ方: xcode-select --install を実行し、画面の指示で入れてから ./install.sh を実行してください"
+      exit 2
+    fi
+  elif [ "$py_ok" -eq 0 ]; then
+    info "Python 3.9 以上が見つからないため、承認の画面のサーバーが動きません。入れずに終了します"
+    info "別の Python を使う場合は、CLAUDE_REVIEW_PYTHON にそのパスを指定して ./install.sh を実行してください"
+    if [ "$dry_run" -eq 0 ]; then exit 2; fi
+    missing_required=1
+  fi
+
+  # 任意のもの: Homebrew と terminal-notifier
+  if [ -z "$TN" ]; then
+    if [ -z "$BREW" ]; then
+      if [ "$dry_run" -eq 1 ]; then
+        planned+=("Homebrew（聞いてから入れる。管理者のパスワードを求められる）")
+        planned+=("terminal-notifier（聞いてから brew install terminal-notifier）")
+      else
+        info "Homebrew を入れる場合は、途中で管理者のパスワードを求められます。"
+        if ask "Homebrew を入れますか。terminal-notifier（押すと画面が開く通知）を入れるために使います。入れない場合も、押しても画面が開かない通知で動きます"; then
+          if [ -n "$BREW_INSTALLER" ]; then
+            "$BREW_INSTALLER" || warn "Homebrew を入れられませんでした"
+          else
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+              || warn "Homebrew を入れられませんでした"
+          fi
+          find_brew
+        fi
+      fi
+    elif [ "$dry_run" -eq 1 ]; then
+      planned+=("terminal-notifier（聞いてから brew install terminal-notifier）")
+    fi
+    if [ -n "$BREW" ] && [ "$dry_run" -eq 0 ]; then
+      if ask "terminal-notifier を入れますか。押すと承認の画面が開く通知に使います。入れない場合は、押しても画面が開かない通知になります"; then
+        "$BREW" install terminal-notifier || warn "terminal-notifier を入れられませんでした"
+        find_tn
+      fi
+    fi
+    if [ -z "$TN" ] && [ "$dry_run" -eq 0 ]; then
+      info "terminal-notifier が無いため、通知は osascript で出します（押しても画面は開きません）"
+    fi
+  fi
+
+  if [ -z "$CLAUDE_BIN" ]; then
+    info "claude が見つからないため、週1回の見直しは登録しません（承認の画面とフックは使えます）"
+  fi
+  build_launchd_path
+
+  if [ "$dry_run" -eq 1 ]; then
+    if [ "${#planned[@]}" -eq 0 ]; then
+      info "[dry-run] 入れるものはありません"
+    else
+      info "[dry-run] 入れるもの（実際の実行では1つずつ確かめます）:"
+      for st in "${planned[@]}"; do info "  - $st"; done
+    fi
+    if [ "$missing_required" -eq 1 ]; then
+      info "[dry-run] 必須のものが足りないため、実際の実行はここで終了します"
+      exit 2
+    fi
+  fi
+}
+
 # ==== 外す ====
 if [ "$uninstall" -eq 1 ]; then
+  # review-loop は旧版が登録した定期実行である。旧版から移ってきた環境のために外す。
   unregister_job review-loop
-  for j in $LOCAL_JOBS; do unregister_job "${j%%:*}"; done
+  for j in $SCHEDULE_JOBS; do unregister_job "${j%%:*}"; done
   bootout_if_registered
   if [ -e "$PLIST" ]; then
     run rm "$PLIST"
   fi
+  # フックはリンクを消す前に外す。スキル置き場を経由して登録したフックを、リンクの先で同じものと判定するためである。
+  if python_usable; then
+    for f in "${settings_files[@]}"; do
+      for c in "${HOOK_CMDS[@]}" "$LEGACY_HOOK_CMD"; do remove_hook "$f" "$c"; done
+    done
+  else
+    warn "Python（${PYTHON}）を使えないため、settings.json のフックを確かめられませんでした"
+  fi
   for d in "${skill_dirs[@]}"; do
     [ -d "$d" ] && unlink_skills "$d"
   done
-  if command -v jq >/dev/null 2>&1; then
-    for f in "${settings_files[@]}"; do remove_hook "$f"; done
-  else
-    warn "jq が無いため、settings.json のフックを確かめられませんでした"
-  fi
   for d in "${skill_dirs[@]}"; do
     for t in "$d"/.trash/*; do
       [ -e "$t" ] || [ -L "$t" ] || continue
-      for s in "$REPO"/core/skills/* "$REPO"/local/skills/*; do
+      for s in "$REPO"/core/skills/*; do
         case "$(basename "$t")" in
           *-"$(basename "$s")")
             info "退避したものがあります（自動では戻しません）: $t"
@@ -484,29 +785,23 @@ if [ "$uninstall" -eq 1 ]; then
       done
     done
   done
-  info "外しました。案の置き場所（${PROPOSALS_DIR}）と台帳（${STATE_DIR}）は残しています。"
+  info "外しました。案の置き場所（${PROPOSALS_DIR}）と台帳（${STATE_DIR}）と見回りの範囲の設定ファイル（${PATROL_CONF}）は残しています。"
   exit 0
 fi
 
 # ==== 入れる ====
-# 1. terminal-notifier
-if command -v terminal-notifier >/dev/null 2>&1; then
-  info "terminal-notifier は入っています"
-elif command -v brew >/dev/null 2>&1; then
-  run brew install terminal-notifier
-else
-  warn "terminal-notifier も brew もありません。通知は osascript で出します（押しても画面は開きません）"
-fi
+# 1. 必要なものの確認（足りないものは聞いてから入れる）と、試しの通知
+check_prerequisites
 check_notifier
 
 # 2. スキル
 for d in "${skill_dirs[@]}"; do
   [ -d "$d" ] || run mkdir -p "$d"
   for s in "${skill_sources[@]}"; do link_skill "$s" "$d"; done
-  # --with-local のときは、このリポジトリの review-loop を指す既存のリンクを外す（.trash へは移さない）。
-  if [ "$with_local" -eq 1 ] && [ -L "$d/review-loop" ] && links_to_repo "$d/review-loop"; then
+  # 旧版が置いた review-loop のリンク（このリポジトリを指すもの）を外す（.trash へは移さない）。
+  if [ -L "$d/review-loop" ] && links_to_repo "$d/review-loop"; then
     run rm "$d/review-loop"
-    info "リンクを消しました（--with-local では review-loop を入れない）: $d/review-loop"
+    info "旧版の review-loop のリンクを消しました: $d/review-loop"
   fi
 done
 
@@ -519,49 +814,48 @@ bootout_if_registered
 run launchctl bootstrap "gui/$uid" "$PLIST"
 
 # 3.5 定期実行
-if [ "$with_local" -eq 1 ]; then
-  # local の3つが同じ役目を持つため、棚卸しは聞かずに登録しない（登録済みなら外す）。
-  unregister_job review-loop
-  for j in $LOCAL_JOBS; do
-    register_local_job "${j%%:*}" "${j#*:}" || warn "定期実行 ${j%%:*} を登録できませんでした。インストールは続けます"
+# 旧版が登録した週1回の棚卸し（review-loop）は、週1回の見直しの3つに置き換わったため外す。
+unregister_job review-loop
+schedule=""
+# claude が無いと見直しは動かないため、聞かずに登録しない（登録済みのものは変えない）。
+if [ -z "$CLAUDE_BIN" ] && [ "$schedule_opt" != "--no-schedule" ]; then
+  schedule_opt="--skip"
+fi
+case "$schedule_opt" in
+  --skip) ;;
+  --with-schedule) schedule=1 ;;
+  --no-schedule) schedule=0 ;;
+  *)
+    if [ "$dry_run" -eq 1 ]; then
+      printf '[dry-run] 聞く: %s\n' "$SCHEDULE_QUESTION"
+      info "[dry-run] y と答えた場合に行う操作:"
+      schedule=1
+    elif [ -t 0 ]; then
+      printf '%s ' "$SCHEDULE_QUESTION"
+      ans=""
+      read -r ans || ans=""
+      case "$ans" in y|Y|yes|YES) schedule=1 ;; *) schedule=0 ;; esac
+    else
+      info "標準入力が端末ではないため、週1回の見直しの登録は変えません（登録するには --with-schedule を付けます）"
+    fi
+    ;;
+esac
+if [ "$schedule" = "1" ]; then
+  for j in $SCHEDULE_JOBS; do
+    register_schedule_job "${j%%:*}" "${j#*:}" || warn "定期実行 ${j%%:*} を登録できませんでした。インストールは続けます"
   done
-else
-  schedule=""
-  case "$schedule_opt" in
-    --with-schedule) schedule=1 ;;
-    --no-schedule) schedule=0 ;;
-    *)
-      if [ -t 0 ]; then
-        info "週1回の棚卸し（スキルとメモリの改善案づくり）は、あなたの Claude の利用枠を使います。"
-        printf '週1回の棚卸しを入れますか [y/N] '
-        ans=""
-        read -r ans || ans=""
-        case "$ans" in y|Y|yes|YES) schedule=1 ;; *) schedule=0 ;; esac
-      else
-        info "標準入力が端末ではないため、棚卸しの登録は変えません（登録するには --with-schedule を付けます）"
-      fi
-      ;;
-  esac
-  if [ "$schedule" = "1" ]; then
-    register_review_loop || warn "棚卸しを登録できませんでした。インストールは続けます"
-  elif [ "$schedule" = "0" ]; then
-    unregister_job review-loop
-  fi
+elif [ "$schedule" = "0" ]; then
+  for j in $SCHEDULE_JOBS; do unregister_job "${j%%:*}"; done
 fi
 
+# 3.6 見回りの範囲（repo-patrol と secret-patrol）
+setup_patrol_conf
+
 # 4. SessionStart フック
-if command -v jq >/dev/null 2>&1; then
-  for f in "${settings_files[@]}"; do
-    if [ "$with_local" -eq 1 ]; then
-      # local/skills/report-inbox のフックが件数を出すため、本体のフックは外す。
-      remove_hook "$f"
-    else
-      add_hook "$f"
-    fi
-  done
-else
-  warn "jq が無いため、SessionStart フックを足していません。README の手順で手動で足してください"
-fi
+for f in "${settings_files[@]}"; do
+  remove_hook "$f" "$LEGACY_HOOK_CMD"
+  for c in "${HOOK_CMDS[@]}"; do add_hook "$f" "$c"; done
+done
 
 info ""
 info "入れました。承認待ちの画面: http://127.0.0.1:$PORT/"

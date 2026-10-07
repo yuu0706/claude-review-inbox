@@ -13,7 +13,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>@@PATH@@</string>
     <key>CLAUDE_REVIEW_PORT</key>
     <string>@@PORT@@</string>
     <key>PYTHONUNBUFFERED</key>

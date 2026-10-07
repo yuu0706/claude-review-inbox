@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- install.sh が @@ で囲んだ値を埋めて ~/Library/LaunchAgents/<ラベル>.plist に書く。直接読み込まない。 -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@@LABEL@@</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>@@SCRIPT@@</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>1</integer>
+		<key>Hour</key>
+		<integer>10</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>@@HOME@@/.local/state/claude-reports/memory-audit/launchd.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>@@HOME@@/.local/state/claude-reports/memory-audit/launchd.stderr.log</string>
+</dict>
+</plist>

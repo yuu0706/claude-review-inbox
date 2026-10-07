@@ -63,23 +63,36 @@ tn_mode() {
     printf '#!/bin/bash\nprintf "open %%s\\n" "$*" >>"$CALLS"\n' >"$FAKEBIN/open"
   fi
 }
+# 検査の側では jq を使う。install.sh からは使わない（呼ばれたら CALLS に残して失敗する）。
 JQ="$(command -v jq)"
 if [ -z "$JQ" ]; then
   echo "jq が無いため検査できません"
   exit 1
 fi
-ln -s "$JQ" "$FAKEBIN/jq"
+jq() { "$JQ" "$@"; }
+printf '#!/bin/bash\nprintf "jq %%s\\n" "$*" >>"$CALLS"\nexit 127\n' >"$FAKEBIN/jq"
+# 必要なものの確認: 本物の xcode-select・/usr/bin/python3・Homebrew の場所・claude を見ないように差し替える。
+FAKE_CLT="$WORK/clt"
+mkdir -p "$FAKE_CLT/usr/bin"
+printf '#!/bin/bash\n' >"$FAKE_CLT/usr/bin/python3"
+printf '#!/bin/bash\n[ "$1" = "-p" ] && echo "%s"\n' "$FAKE_CLT" >"$WORK/xcode-select"
+printf '#!/bin/bash\nexec /usr/bin/python3 "$@"\n' >"$WORK/python3"
+printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/claude"
+chmod +x "$FAKEBIN/jq" "$FAKE_CLT/usr/bin/python3" "$WORK/xcode-select" "$WORK/python3" "$FAKEBIN/claude"
+export CLAUDE_REVIEW_XCODE_SELECT="$WORK/xcode-select"
+export CLAUDE_REVIEW_SYSTEM_PYTHON="$WORK/python3"
+export CLAUDE_REVIEW_BREW_PATHS=""
+export CLAUDE_REVIEW_CLAUDE_PATHS=""
+export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/no-brew-installer"
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # 偽の HOME。~/.claude/skills は ~/.claude2/skills へのリンク（利用者の環境と同じ形）。
 export HOME="$WORK/home"
-# 公開版（local が無い版）では、local を前提にした検査を飛ばす。
-HAS_LOCAL=0
-[ -d "$REPO/local/skills" ] && HAS_LOCAL=1
-WL=()
-[ "$HAS_LOCAL" -eq 1 ] && WL=(--with-local)
-repo_skills() { local s; for s in "$REPO"/core/skills/* "$REPO"/local/skills/*; do [ -d "$s" ] && printf '%s\n' "$s"; done; }
-unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON
+repo_skills() { local s; for s in "$REPO"/core/skills/*; do [ -d "$s" ] && printf '%s\n' "$s"; done; }
+unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF
+# 2つ目の設定ディレクトリは、共通の設定ファイル（jobs.conf）で指定する。
+mkdir -p "$HOME/.config/claude-review-inbox"
+printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude:~/.claude2\n' >"$HOME/.config/claude-review-inbox/jobs.conf"
 mkdir -p "$HOME/.claude" "$HOME/.claude2/skills/other-skill" "$HOME/.claude2/skills/change-review"
 ln -s ../.claude2/skills "$HOME/.claude/skills"
 echo "old" >"$HOME/.claude2/skills/change-review/SKILL.md"
@@ -88,8 +101,27 @@ printf '{"theme":"dark"}\n' >"$HOME/.claude2/settings.json"
 S2="$HOME/.claude2/skills"
 LABEL="com.$(id -un | tr . -).claude-review-inbox"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-HOOK="$REPO/core/hooks/session-start.sh"
-hook_count() { jq --arg c "$HOOK" '[.hooks.SessionStart[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
+HOOKS=("$REPO/core/skills/report-inbox/scripts/unread.sh" "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
+  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh")
+LEGACY_HOOK="$REPO/core/hooks/session-start.sh"
+# 引数: <settings.json> [<コマンド>]。コマンドを省くと、登録する3つの合計を数える。
+hook_count() {
+  local f="$1" c n=0 k
+  if [ $# -ge 2 ]; then
+    jq --arg c "$2" '[.hooks.SessionStart[]?.hooks[]? | select(.command == $c)] | length' "$f"
+    return
+  fi
+  for c in "${HOOKS[@]}"; do
+    k="$(jq --arg c "$c" '[.hooks.SessionStart[]?.hooks[]? | select(.command == $c)] | length' "$f")"
+    n=$((n + k))
+  done
+  printf '%s\n' "$n"
+}
+each_hook_once() {
+  local c
+  for c in "${HOOKS[@]}"; do [ "$(hook_count "$1" "$c")" = "1" ] || return 1; done
+}
+CONF="$HOME/.config/claude-review-inbox/patrol.conf"
 # HOME の中身の一覧（パス・種類・リンク先・内容のハッシュ）。変化の有無を比べるのに使う。
 tree_sig() {
   (cd "$HOME" && find . \( -type f -o -type l -o -type d \) -print | LC_ALL=C sort | while IFS= read -r f; do
@@ -107,29 +139,44 @@ check "終了コード0" '[ "$rc" -eq 0 ]'
 check "HOME が変わらない" '[ "$(tree_sig)" = "$before" ]'
 check "launchctl・brew を呼ばない" '[ ! -s "$CALLS" ]'
 check "試しの通知の操作は表示だけにする" 'printf "%s" "$out" | grep -q "^\[dry-run\] （terminal-notifier があれば）試しの通知"'
-check "行う操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] ln -s $REPO/core/skills/change-review" && printf "%s" "$out" | grep -q "^\[dry-run\] brew install terminal-notifier"'
+check "行う操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] ln -s $REPO/core/skills/change-review" && printf "%s" "$out" | grep -q "^  - terminal-notifier（聞いてから brew install terminal-notifier）"'
+check "jobs.conf の2つ目の設定ディレクトリにもフックを足す" 'printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude2/settings.json"'
+out="$(CLAUDE_REVIEW_JOBS_CONF="$WORK/no-jobs.conf" "$REPO/install.sh" --dry-run 2>&1)"
+check "指定が無ければ ~/.claude2 があっても ~/.claude だけを使う" '! printf "%s" "$out" | grep -Fq ".claude2/settings.json" && printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude/settings.json"'
 
-echo "== 本体だけ"
-out="$("$REPO/install.sh" 2>&1)"
+echo "== 本体だけ（--yes）"
+out="$("$REPO/install.sh" --yes 2>&1)"
 rc=$?
 printf '%s\n' "$out" | tail -3
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "brew で terminal-notifier を入れる" 'grep -Fxq "brew install terminal-notifier" "$CALLS"'
+check "install.sh は jq を呼ばない" '! grep -q "^jq" "$CALLS"'
 check "change-review がリポジトリへのリンクになる" '[ -L "$S2/change-review" ] && [ "$(readlink "$S2/change-review")" = "$REPO/core/skills/change-review" ]'
 trashed="$(ls -d "$S2/.trash/"*-change-review 2>/dev/null)"
 check "既存の実体は .trash/<日時>-<名前> へ退避する" '[ -f "$trashed/SKILL.md" ] && [[ "${trashed##*/}" =~ ^[0-9]{8}-[0-9]{6}-change-review$ ]]'
 check "同じ実体へ二重に置かない（.claude/skills はリンクのまま）" '[ -L "$HOME/.claude/skills" ] && [ "$(ls "$S2/.trash" | wc -l | tr -d " ")" = "1" ]'
-check "local のスキルは入れない" '[ ! -e "$S2/memory-audit" ] && [ ! -e "$S2/report-inbox" ]'
-check "本体だけでは review-loop をリンクする" '[ -L "$S2/review-loop" ] && [ "$(readlink "$S2/review-loop")" = "$REPO/core/skills/review-loop" ]'
+ok_links=1
+n_links=0
+while IFS= read -r s; do
+  n_links=$((n_links + 1))
+  [ -L "$S2/${s##*/}" ] && [ "$(readlink "$S2/${s##*/}")" = "$s" ] || ok_links=0
+done < <(repo_skills)
+check "core/skills の全スキル（${n_links}件）がリンクになる" '[ "$ok_links" -eq 1 ] && [ "$n_links" -ge 7 ]'
+for n in change-review memory-audit feedback-mining skill-audit report-inbox repo-patrol secret-patrol; do
+  check "スキル $n をリンクする" '[ -L "$S2/$n" ]'
+done
+check "review-loop を置かない" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ]'
+check "--yes では見回りの範囲を「入れない・見回らない」で書く" 'grep -qx "PERSONAL_FOLDERS=no" "$CONF" && grep -qx "REPO_ROOTS=" "$CONF"'
 check "他のスキルに触れない" '[ -d "$S2/other-skill" ] && [ ! -L "$S2/other-skill" ]'
 check "plist を作る" '[ -f "$PLIST" ] && plutil -lint "$PLIST" >/dev/null'
-check "plist のラベル・サーバー・常駐の設定" '[ "$(plutil -extract Label raw "$PLIST")" = "$LABEL" ] && [ "$(plutil -extract ProgramArguments.1 raw "$PLIST")" = "$REPO/core/server/inbox_server.py" ] && [ "$(plutil -extract ProgramArguments.0 raw "$PLIST")" = "/usr/bin/python3" ] && [ "$(plutil -extract RunAtLoad raw "$PLIST")" = "true" ] && [ "$(plutil -extract KeepAlive raw "$PLIST")" = "true" ] && [ "$(plutil -extract EnvironmentVariables.CLAUDE_REVIEW_PORT raw "$PLIST")" = "8010" ]'
+check "plist のラベル・サーバー・常駐の設定" '[ "$(plutil -extract Label raw "$PLIST")" = "$LABEL" ] && [ "$(plutil -extract ProgramArguments.1 raw "$PLIST")" = "$REPO/core/server/inbox_server.py" ] && [ "$(plutil -extract ProgramArguments.0 raw "$PLIST")" = "$WORK/python3" ] && [ "$(plutil -extract RunAtLoad raw "$PLIST")" = "true" ] && [ "$(plutil -extract KeepAlive raw "$PLIST")" = "true" ] && [ "$(plutil -extract EnvironmentVariables.CLAUDE_REVIEW_PORT raw "$PLIST")" = "8010" ]'
 check "ログの置き場所を状態の置き場所にする" '[ "$(plutil -extract StandardOutPath raw "$PLIST")" = "$HOME/.local/state/claude-review-inbox/server.log" ]'
 check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
 check "未登録なら bootout しない" '! grep -q "launchctl bootout" "$CALLS"'
-check "両方の settings.json にフックを1つ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "1" ] && [ "$(hook_count "$HOME/.claude2/settings.json")" = "1" ]'
+check "両方の settings.json に3つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "3" ] && [ "$(hook_count "$HOME/.claude2/settings.json")" = "3" ] && each_hook_once "$HOME/.claude/settings.json"'
+check "旧版のフック（session-start.sh）は足さない" '[ "$(hook_count "$HOME/.claude/settings.json" "$LEGACY_HOOK")" = "0" ]'
 check "既存の設定を消さない" '[ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/.claude2/settings.json")" = "dark" ]'
-check "書き換える前に settings.json.bak-<日時> を残す" '[ "$(ls "$HOME/.claude/"settings.json.bak-* | wc -l | tr -d " ")" = "1" ] && grep -q "/other/hook.sh" "$HOME/.claude/"settings.json.bak-* && ! grep -q "session-start.sh" "$HOME/.claude/"settings.json.bak-*'
+check "書き換える前に settings.json.bak-<日時> を残す" '[ "$(ls "$HOME/.claude/"settings.json.bak-* | wc -l | tr -d " ")" = "1" ] && grep -q "/other/hook.sh" "$HOME/.claude/"settings.json.bak-* && ! grep -q "unread.sh" "$HOME/.claude/"settings.json.bak-*'
 check "案と状態の置き場所を作る" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
 check "最後に URL と通知の許可の案内を出す" 'printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/" && printf "%s" "$out" | grep -q "5. 通知の許可"'
 
@@ -142,46 +189,35 @@ check "終了コード0" '[ "$rc" -eq 0 ]'
 check "HOME の中身が同じ（退避・バックアップが増えない）" '[ "$(tree_sig)" = "$sig1" ]'
 check "登録済みなら bootout してから bootstrap する" '[ "$(cat "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
 
-if [ "$HAS_LOCAL" -eq 1 ]; then
-echo "== --with-local"
+echo "== 旧版の後始末（review-loop のリンクと session-start.sh のフック）"
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
 mkdir -p "$S2/memory-audit"
 echo "old" >"$S2/memory-audit/SKILL.md"
+ln -s "$REPO/core/skills/review-loop" "$S2/review-loop"
+jq --arg c "$LEGACY_HOOK" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
 : >"$CALLS"
-check "--with-local の前は review-loop のリンクがある" '[ -L "$S2/review-loop" ]'
-out="$("$REPO/install.sh" --with-local 2>&1)"
+out="$("$REPO/install.sh" 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
-ok_links=1
-for s in "$REPO"/core/skills/* "$REPO"/local/skills/*; do
-  n="${s##*/}"
-  [ "$n" = "review-loop" ] && continue
-  [ -L "$S2/$n" ] && [ "$(readlink "$S2/$n")" = "$s" ] || ok_links=0
-done
-check "review-loop 以外の core と local の全スキルがリンクになる" '[ "$ok_links" -eq 1 ]'
-check "--with-local では既存の review-loop のリンクを外す" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ] && printf "%s" "$out" | grep -Fq "リンクを消しました（--with-local では review-loop を入れない）: $S2/review-loop"'
+check "旧版の review-loop のリンクを外す" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ] && printf "%s" "$out" | grep -Fq "旧版の review-loop のリンクを消しました: $S2/review-loop"'
 check "外した review-loop は .trash へ移さない" '[ -z "$(ls -d "$S2/.trash/"*-review-loop 2>/dev/null)" ]'
-check "local の既存の実体も退避する" '[ -f "$(ls -d "$S2/.trash/"*-memory-audit)/SKILL.md" ]'
-check "--with-local では本体のフックを外す（report-inbox が件数を出す）" '[ "$(hook_count "$HOME/.claude/settings.json")" = "0" ] && [ "$(hook_count "$HOME/.claude2/settings.json")" = "0" ]'
-check "外しても他のフックと設定は残る" '[ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/.claude2/settings.json")" = "dark" ] && [ "$(jq "has(\"hooks\")" "$HOME/.claude2/settings.json")" = "false" ]'
+check "既存の実体（memory-audit）は退避してリンクにする" '[ -f "$(ls -d "$S2/.trash/"*-memory-audit)/SKILL.md" ] && [ -L "$S2/memory-audit" ]'
+check "旧版のフックを外し、3つのフックを足す" '[ "$(hook_count "$HOME/.claude2/settings.json" "$LEGACY_HOOK")" = "0" ] && each_hook_once "$HOME/.claude2/settings.json"'
+check "他のフックと設定は残る" '[ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/.claude2/settings.json")" = "dark" ]'
 sig2="$(tree_sig)"
-"$REPO/install.sh" --with-local >/dev/null 2>&1
-check "--with-local も2回目で変わらない" '[ "$(tree_sig)" = "$sig2" ]'
+"$REPO/install.sh" >/dev/null 2>&1
+check "後始末の後も2回目で変わらない" '[ "$(tree_sig)" = "$sig2" ]'
 
-echo "== --with-local（review-loop のリンクが無い状態から）"
-rm -f "$S2/review-loop"
-"$REPO/install.sh" --with-local >/dev/null 2>&1
-check "--with-local では review-loop のリンクを作らない" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ]'
-out="$("$REPO/install.sh" --with-local --dry-run 2>&1)"
-check "--with-local の --dry-run は review-loop を置く操作を表示しない" '! printf "%s" "$out" | grep -q "core/skills/review-loop"'
-mkdir -p "$WORK/elsewhere/review-loop"
-ln -s "$WORK/elsewhere/review-loop" "$S2/review-loop"
-"$REPO/install.sh" --with-local >/dev/null 2>&1
-check "--with-local でも他を指す review-loop のリンクは消さない" '[ -L "$S2/review-loop" ] && [ "$(readlink "$S2/review-loop")" = "$WORK/elsewhere/review-loop" ]'
-rm -f "$S2/review-loop"
+echo "== スキル置き場を経由して登録済みのフックは二重に足さない"
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
+"$REPO/install.sh" >/dev/null 2>&1
+jq --arg c "$REPO/core/skills/report-inbox/scripts/unread.sh" 'del(.hooks.SessionStart[] | select(.hooks[]?.command == $c))' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
+jq --arg c "$S2/report-inbox/scripts/unread.sh" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
+"$REPO/install.sh" >/dev/null 2>&1
+check "リンクの先が同じなら足さない" '[ "$(hook_count "$HOME/.claude2/settings.json" "$REPO/core/skills/report-inbox/scripts/unread.sh")" = "0" ] && [ "$(hook_count "$HOME/.claude2/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "1" ]'
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
+check "--uninstall はスキル置き場を経由したフックも外す" '[ "$(hook_count "$HOME/.claude2/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "0" ]'
 
-else
-  echo "== --with-local: local が無いため飛ばす"
-fi
 
 echo "== --uninstall"
 : >"$CALLS"
@@ -213,19 +249,17 @@ relink_via_old() {
     ln -sfn "$OLDREPO/${s#"$REPO"/}" "$S2/${s##*/}"
   done < <(repo_skills)
 }
-"$REPO/install.sh" ${WL[@]+"${WL[@]}"} >/dev/null 2>&1
+"$REPO/install.sh" >/dev/null 2>&1
 relink_via_old
 trash_before="$(ls "$S2/.trash" | wc -l | tr -d " ")"
-out="$("$REPO/install.sh" ${WL[@]+"${WL[@]}"} 2>&1)"
+out="$("$REPO/install.sh" 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 ok_links=1
 while IFS= read -r s; do
-  [ "$HAS_LOCAL" -eq 1 ] && [ "${s##*/}" = "review-loop" ] && continue
   [ "$(readlink "$S2/${s##*/}")" = "$s" ] || ok_links=0
 done < <(repo_skills)
 check "旧位置を指すリンクを新位置へ張り直す" '[ "$ok_links" -eq 1 ]'
-[ "$HAS_LOCAL" -eq 1 ] && check "旧位置を経由する review-loop のリンクも --with-local では外す" '[ ! -L "$S2/review-loop" ]'
 check "張り直したと表示する" 'printf "%s" "$out" | grep -Fq "リンクを張り直しました: $S2/change-review（旧: $OLDREPO/core/skills/change-review）"'
 check "張り直しでは .trash へ退避しない" '[ "$(ls "$S2/.trash" | wc -l | tr -d " ")" = "$trash_before" ]'
 check "リポジトリの中にリンクを作らない" '[ ! -L "$REPO/core/skills/change-review/change-review" ]'
@@ -282,20 +316,17 @@ rm -f "$FAKEBIN/brew"
 : >"$CALLS"
 out="$("$REPO/install.sh" 2>&1)"
 rc=$?
-check "警告して続ける" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -q "WARN: terminal-notifier も brew もありません" && [ -f "$PLIST" ]'
+check "osascript で出すと表示して続ける" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -q "terminal-notifier が無いため、通知は osascript で出します" && [ -f "$PLIST" ] && [ ! -e "$WORK/no-brew-installer.called" ]'
 
-echo "== local が無い版で --with-local"
-NOLOCAL="$WORK/nolocal-repo"
-mkdir -p "$NOLOCAL"
-cp -R "$REPO/core" "$REPO/install.sh" "$NOLOCAL/"
+echo "== --with-local は不要になった"
 sig="$(tree_sig)"
 : >"$CALLS"
-out="$("$NOLOCAL/install.sh" --with-local 2>&1)"
+out="$("$REPO/install.sh" --with-local 2>&1)"
 rc=$?
 check "終了コード2" '[ "$rc" -eq 2 ]'
-check "local が無いと表示する" 'printf "%s" "$out" | grep -Fq "この版には local がありません。本体だけを入れる場合は --with-local を外してください"'
+check "不要になったと表示する" 'printf "%s" "$out" | grep -Fq -- "--with-local は不要になりました。付けずに実行してください"'
 check "HOME を変えず外部のコマンドを呼ばない" '[ "$(tree_sig)" = "$sig" ] && [ ! -s "$CALLS" ]'
-out="$("$NOLOCAL/install.sh" --with-local --dry-run 2>&1)"
+out="$("$REPO/install.sh" --dry-run --with-local 2>&1)"
 rc=$?
 check "--dry-run でも終了コード2" '[ "$rc" -eq 2 ]'
 

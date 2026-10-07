@@ -1,13 +1,10 @@
 #!/bin/bash
-# install.sh の定期実行（週1回の棚卸しと local の3つ）の検査。一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。
-# 本物の HOME・launchctl・brew・terminal-notifier には触れない。
+# install.sh の定期実行（週1回の見直しの3つ）と見回りの範囲（patrol.conf）の検査。
+# 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl・brew・terminal-notifier には触れない。
 set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$TESTS_DIR/../.." && pwd -P)"
-# 公開版（local が無い版）では、local を前提にした検査を飛ばす。
-HAS_LOCAL=0
-[ -d "$REPO/local/skills" ] && HAS_LOCAL=1
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/review-install-schedule-test.XXXXXX")"
 WORK="$(cd -P "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
@@ -19,11 +16,11 @@ ng() { fail=$((fail + 1)); printf 'FAIL: %s\n' "$1"; }
 check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 
 # 偽の launchctl。呼ばれた引数を CALLS へ記録し、登録の状態をラベルごとのファイルで持つ。
-# brew と terminal-notifier は置かない（install.sh は警告して続ける）。
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
 export CALLS="$WORK/calls.log"
 export FAKE_LAUNCHD="$WORK/launchd-registered"
+mkdir -p "$FAKE_LAUNCHD"
 cat >"$FAKEBIN/launchctl" <<'FAKE'
 #!/bin/bash
 printf 'launchctl %s\n' "$*" >>"$CALLS"
@@ -35,27 +32,40 @@ esac
 FAKE
 chmod +x "$FAKEBIN/launchctl"
 ln -s "$(command -v jq)" "$FAKEBIN/jq"
+# 必要なものの確認: 本物の xcode-select・Homebrew の場所・claude を見ないように差し替える。claude は偽物を置く。
+mkdir -p "$WORK/clt/usr/bin"
+printf '#!/bin/bash\n' >"$WORK/clt/usr/bin/python3"
+printf '#!/bin/bash\n[ "$1" = "-p" ] && echo "%s"\n' "$WORK/clt" >"$WORK/xcode-select"
+printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/claude"
+# terminal-notifier も偽物を置き、Homebrew と terminal-notifier の問いを出さない。
+printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/terminal-notifier"
+chmod +x "$WORK/clt/usr/bin/python3" "$WORK/xcode-select" "$FAKEBIN/claude" "$FAKEBIN/terminal-notifier"
+export CLAUDE_REVIEW_XCODE_SELECT="$WORK/xcode-select"
+export CLAUDE_REVIEW_BREW_PATHS=""
+export CLAUDE_REVIEW_CLAUDE_PATHS=""
+export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/no-brew-installer"
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
 export HOME="$WORK/home"
-unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON CLAUDE_REVIEW_LOOP_WEEKDAY CLAUDE_REVIEW_LOOP_HOUR \
-  CLAUDE_REVIEW_LOOP_MINUTE CLAUDE_REVIEW_LOOP_MODEL CLAUDE_REVIEW_LOOP_EFFORT
+unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME
 mkdir -p "$HOME/.claude" "$HOME/.claude2/skills"
 ln -s ../.claude2/skills "$HOME/.claude/skills"
 printf '{}\n' >"$HOME/.claude/settings.json"
 S2="$HOME/.claude2/skills"
 AG="$HOME/Library/LaunchAgents"
 U="com.$(id -un | tr . -)"
-LOOP_LABEL="$U.review-loop"
-LOOP_PLIST="$AG/$LOOP_LABEL.plist"
 JOBS="$HOME/.local/state/claude-review-inbox/scheduled-jobs.tsv"
+CONF="$HOME/.config/claude-review-inbox/patrol.conf"
 UIDN="$(id -u)"
+Q_SCHEDULE="週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか。claude の利用枠を使います [y/N]"
+Q_PERSONAL="書類・デスクトップ・ダウンロードのフォルダを、個人情報の置き忘れの見回りに入れますか。初めて見回るときに、macOS がフォルダへのアクセスの許可を求めます [y/N]"
+Q_REPOS="手元のリポジトリを置いているフォルダを入力してください（例: ~/Documents/git。空なら見回りません）"
 
 # 標準入力を疑似端末にして install.sh を動かす。$1 は入力する文字列。
 tty_install() {
   local input="$1"
   shift
-  /usr/bin/python3 - "$input" "$REPO/install.sh" "$@" <<'PY'
+  /usr/bin/python3 -B - "$input" "$REPO/install.sh" "$@" <<'PY'
 import os, subprocess, sys
 m, s = os.openpty()
 os.write(m, sys.argv[1].encode())
@@ -72,117 +82,147 @@ tree_sig() {
   done)
 }
 px() { plutil -extract "$2" raw "$1" 2>/dev/null; }
+has() { printf '%s' "$out" | grep -Fq -- "$1"; }
+no_jobs() { [ ! -e "$AG/$U.memory-audit.plist" ] && [ ! -e "$AG/$U.feedback-mining.plist" ] && [ ! -e "$AG/$U.skill-audit.plist" ]; }
 
-echo "== 本体だけ・非端末で指定なし"
+echo "== 非端末で指定なし"
 out="$("$REPO/install.sh" </dev/null 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "聞かない" '! printf "%s" "$out" | grep -q "\[y/N\]"'
-check "棚卸しを登録しない" '[ ! -e "$LOOP_PLIST" ] && ! grep -q "review-loop" "$CALLS"'
-check "棚卸しのスキルはリンクで置く" '[ "$(readlink "$S2/review-loop")" = "$REPO/core/skills/review-loop" ]'
+check "定期実行を登録しない" 'no_jobs && ! grep -q "bootstrap.*memory-audit" "$CALLS"'
+check "見回りの範囲の設定ファイルを書かない" '[ ! -e "$CONF" ] && has "見回りの範囲を聞かず、設定ファイルも書きません"'
 
-echo "== 本体だけ・聞かれて n"
+echo "== 聞かれて n（見回りの範囲も聞く）"
 : >"$CALLS"
-out="$(tty_install $'n\n')"
+out="$(tty_install $'n\nn\n\n')"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "聞く（利用枠を使うことも示す）" 'printf "%s" "$out" | grep -q "週1回の棚卸しを入れますか \[y/N\]" && printf "%s" "$out" | grep -q "利用枠を使います"'
-check "登録しない" '[ ! -e "$LOOP_PLIST" ] && ! grep -q "review-loop" "$CALLS"'
+check "定期実行の問いの文言" 'has "$Q_SCHEDULE"'
+check "登録しない" 'no_jobs'
+check "見回りの範囲の2つの問いを出す" 'has "$Q_PERSONAL" && has "$Q_REPOS"'
+check "答えを設定ファイルに書く（入れない・見回らない）" 'grep -qx "PERSONAL_FOLDERS=no" "$CONF" && grep -qx "REPO_ROOTS=" "$CONF"'
 
-echo "== 本体だけ・聞かれて y"
+echo "== 聞かれて y（設定ファイルがあれば見回りの範囲は聞かない）"
 : >"$CALLS"
+conf_before="$(cat "$CONF")"
 out="$(tty_install $'y\n')"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "plist を作る" '[ -f "$LOOP_PLIST" ] && plutil -lint "$LOOP_PLIST" >/dev/null'
-check "ラベルと起動スクリプト" '[ "$(px "$LOOP_PLIST" Label)" = "$LOOP_LABEL" ] && [ "$(px "$LOOP_PLIST" ProgramArguments.1)" = "$S2/review-loop/scripts/run.sh" ]'
-check "既定は毎週月曜 10:00" '[ "$(px "$LOOP_PLIST" StartCalendarInterval.Weekday)" = "1" ] && [ "$(px "$LOOP_PLIST" StartCalendarInterval.Hour)" = "10" ] && [ "$(px "$LOOP_PLIST" StartCalendarInterval.Minute)" = "0" ]'
-check "モデルの指定が無ければ書かない" '[ -z "$(px "$LOOP_PLIST" EnvironmentVariables.CLAUDE_REVIEW_LOOP_MODEL)" ]'
-check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$UIDN $LOOP_PLIST" "$CALLS"'
-check "台帳に記録する" 'grep -q "^review-loop	$LOOP_LABEL	$LOOP_PLIST	0$" "$JOBS"'
+check "見回りの範囲は聞かない" '! has "$Q_PERSONAL" && has "見回りの範囲は設定済みです" && [ "$(cat "$CONF")" = "$conf_before" ]'
+check "3つの plist を作る" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.feedback-mining.plist" ] && [ -f "$AG/$U.skill-audit.plist" ]'
+check "起動スクリプトはスキル置き場の中" '[ "$(px "$AG/$U.memory-audit.plist" ProgramArguments.1)" = "$S2/memory-audit/scripts/run.sh" ] && [ "$(px "$AG/$U.feedback-mining.plist" ProgramArguments.1)" = "$S2/feedback-mining/scripts/run.sh" ] && [ "$(px "$AG/$U.skill-audit.plist" ProgramArguments.1)" = "$S2/skill-audit/scripts/run-audit.sh" ]'
+check "時刻はひな形のまま（memory-audit 10:30・feedback-mining 11:00・skill-audit 10:00）" '[ "$(px "$AG/$U.memory-audit.plist" StartCalendarInterval.Minute)" = "30" ] && [ "$(px "$AG/$U.feedback-mining.plist" StartCalendarInterval.Hour)" = "11" ] && [ "$(px "$AG/$U.skill-audit.plist" StartCalendarInterval.Hour)" = "10" ]'
+check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$UIDN $AG/$U.skill-audit.plist" "$CALLS"'
+check "台帳に3つを記録する" '[ "$(wc -l <"$JOBS" | tr -d " ")" = "3" ] && grep -q "^memory-audit	$U.memory-audit	$AG/$U.memory-audit.plist	0$" "$JOBS"'
 
-echo "== --no-schedule は登録済みの棚卸しを外す"
+echo "== --no-schedule は登録済みの3つを外す"
 : >"$CALLS"
 out="$("$REPO/install.sh" --no-schedule </dev/null 2>&1)"
-check "plist を消し、bootout する" '[ ! -e "$LOOP_PLIST" ] && grep -Fxq "launchctl bootout gui/$UIDN/$LOOP_LABEL" "$CALLS"'
-check "台帳から消す" '[ ! -f "$JOBS" ] || ! grep -q "^review-loop" "$JOBS"'
+check "plist を消し、bootout する" 'no_jobs && grep -Fxq "launchctl bootout gui/$UIDN/$U.feedback-mining" "$CALLS"'
+check "台帳から消す" '[ ! -f "$JOBS" ] || ! grep -q "audit\|mining" "$JOBS"'
 
-echo "== --with-schedule と時刻・モデルの指定"
+echo "== --with-schedule"
 : >"$CALLS"
-out="$(CLAUDE_REVIEW_LOOP_WEEKDAY=3 CLAUDE_REVIEW_LOOP_HOUR=07 CLAUDE_REVIEW_LOOP_MINUTE=05 CLAUDE_REVIEW_LOOP_MODEL=sonnet \
-  "$REPO/install.sh" --with-schedule </dev/null 2>&1)"
+out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
 rc=$?
 check "終了コード0で聞かない" '[ "$rc" -eq 0 ] && ! printf "%s" "$out" | grep -q "\[y/N\]"'
-check "時刻を plist に書く" '[ "$(px "$LOOP_PLIST" StartCalendarInterval.Weekday)" = "3" ] && [ "$(px "$LOOP_PLIST" StartCalendarInterval.Hour)" = "7" ] && [ "$(px "$LOOP_PLIST" StartCalendarInterval.Minute)" = "5" ]'
-check "モデルを plist の環境変数に書く" '[ "$(px "$LOOP_PLIST" EnvironmentVariables.CLAUDE_REVIEW_LOOP_MODEL)" = "sonnet" ] && [ -z "$(px "$LOOP_PLIST" EnvironmentVariables.CLAUDE_REVIEW_LOOP_EFFORT)" ]'
-"$REPO/install.sh" --with-schedule </dev/null >/dev/null 2>&1
+check "3つを登録する" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.skill-audit.plist" ]'
 sig="$(tree_sig)"
 : >"$CALLS"
 "$REPO/install.sh" --with-schedule </dev/null >/dev/null 2>&1
 check "2回実行しても HOME が同じ" '[ "$(tree_sig)" = "$sig" ]'
-check "登録済みなら bootout してから bootstrap する" '[ "$(grep "review-loop" "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
-out="$(CLAUDE_REVIEW_LOOP_HOUR=25 "$REPO/install.sh" --with-schedule </dev/null 2>&1)"
-rc=$?
-check "時刻が正しくなければ警告して登録を変えない（終了コード0）" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -q "棚卸しの時刻の指定が正しくありません" && [ "$(px "$LOOP_PLIST" StartCalendarInterval.Hour)" = "10" ]'
+check "登録済みなら bootout してから bootstrap する" '[ "$(grep "skill-audit" "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
 "$REPO/install.sh" --with-schedule --no-schedule >/dev/null 2>&1
 check "--with-schedule と --no-schedule の同時指定は終了コード2" '[ $? -eq 2 ]'
+"$REPO/install.sh" --no-schedule </dev/null >/dev/null 2>&1
 
-if [ "$HAS_LOCAL" -eq 1 ]; then
-echo "== --with-local（既存のラベルの引き継ぎを含む）"
-# 利用者の Mac と同じく、別のラベルで memory-audit を手で登録してある状態を作る。
+echo "== claude が無ければ聞かずに登録しない"
+mv "$FAKEBIN/claude" "$WORK/claude.unused"
+out="$(tty_install $'y\n')"
+check "聞かず、登録しない" '! has "$Q_SCHEDULE" && no_jobs && has "週1回の見直しは登録しません"'
+mv "$WORK/claude.unused" "$FAKEBIN/claude"
+
+echo "== 既存のラベルの引き継ぎ"
+# 別のラベルで memory-audit を手で登録してある状態を作る。
 mkdir -p "$AG"
 OLD_PL="$AG/com.handmade.memory-audit.plist"
 sed -e "s|@@LABEL@@|com.handmade.memory-audit|" -e "s|@@SCRIPT@@|$S2/memory-audit/scripts/run.sh|" -e "s|@@HOME@@|/old/home|g" \
-  "$REPO/local/skills/memory-audit/launchd/memory-audit.plist.template" >"$OLD_PL"
+  "$REPO/core/skills/memory-audit/launchd/memory-audit.plist.template" >"$OLD_PL"
 old_sum="$(shasum -a 256 <"$OLD_PL")"
 touch "$FAKE_LAUNCHD/com.handmade.memory-audit"
 : >"$CALLS"
-out="$(tty_install '' --with-local)"
+out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "棚卸しは聞かない" '! printf "%s" "$out" | grep -q "\[y/N\]"'
-check "登録済みの棚卸しを外す" '[ ! -e "$LOOP_PLIST" ] && grep -Fxq "launchctl bootout gui/$UIDN/$LOOP_LABEL" "$CALLS"'
-check "既存のラベルを引き継ぐ（二重に登録しない）" '[ ! -e "$AG/$U.memory-audit.plist" ] && [ "$(px "$OLD_PL" Label)" = "com.handmade.memory-audit" ] && printf "%s" "$out" | grep -q "既存のラベルを引き継ぎます: com.handmade.memory-audit"'
+check "既存のラベルを引き継ぐ（二重に登録しない）" '[ ! -e "$AG/$U.memory-audit.plist" ] && [ "$(px "$OLD_PL" Label)" = "com.handmade.memory-audit" ] && has "既存のラベルを引き継ぎます: com.handmade.memory-audit"'
 check "引き継いだ plist を書き換え、bootout してから bootstrap する" '[ "$(px "$OLD_PL" StandardOutPath)" = "$HOME/.local/state/claude-reports/memory-audit/launchd.stdout.log" ] && [ "$(grep "handmade" "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
 bk="$(ls "$HOME/.local/state/claude-review-inbox/plist-backup/"*/com.handmade.memory-audit.plist 2>/dev/null | head -1)"
 check "書き換える前の plist を複製する" '[ -n "$bk" ] && [ "$(shasum -a 256 <"$bk")" = "$old_sum" ]'
-check "他の2つは既定のラベルで登録する" '[ "$(px "$AG/$U.feedback-mining.plist" Label)" = "$U.feedback-mining" ] && [ "$(px "$AG/$U.skill-audit.plist" Label)" = "$U.skill-audit" ] && grep -Fxq "launchctl bootstrap gui/$UIDN $AG/$U.skill-audit.plist" "$CALLS"'
-check "起動スクリプトはスキル置き場の中" '[ "$(px "$AG/$U.feedback-mining.plist" ProgramArguments.1)" = "$S2/feedback-mining/scripts/run.sh" ] && [ "$(px "$AG/$U.skill-audit.plist" ProgramArguments.1)" = "$S2/skill-audit/scripts/run-audit.sh" ]'
-check "時刻はひな形のまま（memory-audit 10:30・feedback-mining 11:00・skill-audit 10:00）" '[ "$(px "$OLD_PL" StartCalendarInterval.Minute)" = "30" ] && [ "$(px "$AG/$U.feedback-mining.plist" StartCalendarInterval.Hour)" = "11" ] && [ "$(px "$AG/$U.skill-audit.plist" StartCalendarInterval.Hour)" = "10" ]'
-check "ログの置き場所を作る" '[ -d "$HOME/.local/state/claude-reports/feedback-mining" ] && [ -d "$HOME/.local/state/skill-audit" ]'
-check "台帳に3つを記録する（引き継ぎの印つき）" '[ "$(wc -l <"$JOBS" | tr -d " ")" = "3" ] && grep -q "^memory-audit	com.handmade.memory-audit	$OLD_PL	1$" "$JOBS"'
-sig="$(tree_sig)"
+check "台帳に引き継ぎの印をつける" 'grep -q "^memory-audit	com.handmade.memory-audit	$OLD_PL	1$" "$JOBS"'
+
+echo "== 旧版の review-loop の後始末"
+OLD_LOOP="$AG/$U.review-loop.plist"
+cp "$AG/$U.skill-audit.plist" "$OLD_LOOP"
+plutil -replace Label -string "$U.review-loop" "$OLD_LOOP"
+touch "$FAKE_LAUNCHD/$U.review-loop"
+printf 'review-loop\t%s\t%s\t0\n' "$U.review-loop" "$OLD_LOOP" >>"$JOBS"
+ln -s "$REPO/core/skills/review-loop" "$S2/review-loop"
 : >"$CALLS"
-"$REPO/install.sh" --with-local </dev/null >/dev/null 2>&1
-check "2回実行しても HOME が同じ（複製も増えない）" '[ "$(tree_sig)" = "$sig" ]'
-check "2回目も同じラベルで登録し直す" '[ "$(grep -c "^launchctl bootstrap" "$CALLS")" = "4" ] && grep -q "bootstrap gui/$UIDN $OLD_PL" "$CALLS"'
+out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
+check "旧版の定期実行を外す" '[ ! -e "$OLD_LOOP" ] && grep -Fxq "launchctl bootout gui/$UIDN/$U.review-loop" "$CALLS" && ! grep -q "^review-loop" "$JOBS"'
+check "旧版のリンクを外す（.trash へ移さない）" '[ ! -L "$S2/review-loop" ] && [ -z "$(ls -d "$S2/.trash/"*-review-loop 2>/dev/null)" ]'
+mkdir -p "$WORK/elsewhere/review-loop"
+ln -s "$WORK/elsewhere/review-loop" "$S2/review-loop"
+"$REPO/install.sh" --with-schedule </dev/null >/dev/null 2>&1
+check "他を指す review-loop のリンクは消さない" '[ -L "$S2/review-loop" ]'
+rm -f "$S2/review-loop"
 
 echo "== --uninstall"
+cp "$AG/$U.skill-audit.plist" "$OLD_LOOP"
+plutil -replace Label -string "$U.review-loop" "$OLD_LOOP"
+touch "$FAKE_LAUNCHD/$U.review-loop"
+printf 'review-loop\t%s\t%s\t0\n' "$U.review-loop" "$OLD_LOOP" >>"$JOBS"
 : >"$CALLS"
 out="$("$REPO/install.sh" --uninstall 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "引き継いだラベルを外す前に表示する" 'printf "%s" "$out" | grep -q "定期実行を外します（既存のラベルを引き継いだもの）: com.handmade.memory-audit"'
-check "3つの定期実行を外す" '[ ! -e "$OLD_PL" ] && [ ! -e "$AG/$U.feedback-mining.plist" ] && [ ! -e "$AG/$U.skill-audit.plist" ] && grep -Fxq "launchctl bootout gui/$UIDN/com.handmade.memory-audit" "$CALLS" && grep -Fxq "launchctl bootout gui/$UIDN/$U.skill-audit" "$CALLS"'
+check "引き継いだラベルを外す前に表示する" 'has "定期実行を外します（既存のラベルを引き継いだもの）: com.handmade.memory-audit"'
+check "3つと旧版の review-loop を外す" '[ ! -e "$OLD_PL" ] && no_jobs && [ ! -e "$OLD_LOOP" ] && grep -Fxq "launchctl bootout gui/$UIDN/$U.review-loop" "$CALLS"'
 check "台帳を消す" '[ ! -e "$JOBS" ]'
 check "launchd に何も残らない" '[ -z "$(ls "$FAKE_LAUNCHD")" ]'
-else
-  echo "== --with-local と --uninstall: local が無いため飛ばす"
-fi
-"$REPO/install.sh" --with-schedule </dev/null >/dev/null 2>&1
-"$REPO/install.sh" --uninstall >/dev/null 2>&1
-check "棚卸しも外す" '[ ! -e "$LOOP_PLIST" ] && [ -z "$(ls "$FAKE_LAUNCHD")" ]'
+check "見回りの範囲の設定ファイルは残す" '[ -f "$CONF" ]'
 
-echo "== --dry-run は何も変えない"
+echo "== 見回りの範囲: 書類などを入れ、リポジトリの置き場所を答える"
+rm -f "$CONF"
+out="$(tty_install $'n\ny\n~/Documents/git\n')"
+check "答えを設定ファイルに書く" 'grep -qx "PERSONAL_FOLDERS=yes" "$CONF" && grep -qx "REPO_ROOTS=~/Documents/git" "$CONF"'
+check "書類の下のフォルダには許可のダイアログが出ることを表示する" 'has "~/Documents/git は書類・デスクトップ・ダウンロードの下にあるため、初めて見回るときに macOS がフォルダへのアクセスの許可を求めます"'
+rm -f "$CONF"
+out="$(tty_install $'n\nn\n/opt/repos\n')"
+check "書類の外のフォルダには許可の表示をしない" 'grep -qx "REPO_ROOTS=/opt/repos" "$CONF" && ! has "/opt/repos は"'
+rm -f "$CONF"
+out="$("$REPO/install.sh" --yes </dev/null 2>&1)"
+check "--yes は聞かずに「入れない・見回らない」" '! has "$Q_PERSONAL" && grep -qx "PERSONAL_FOLDERS=no" "$CONF" && grep -qx "REPO_ROOTS=" "$CONF"'
+printf 'PERSONAL_FOLDERS=yes\nREPO_ROOTS=/x\n' >"$CONF"
+out="$("$REPO/install.sh" --yes </dev/null 2>&1)"
+check "既にあれば --yes でも書き換えない" '[ "$(cat "$CONF")" = "$(printf "PERSONAL_FOLDERS=yes\nREPO_ROOTS=/x")" ]'
+XC="$WORK/xdg"
+out="$(XDG_CONFIG_HOME="$XC" "$REPO/install.sh" --yes </dev/null 2>&1)"
+check "XDG_CONFIG_HOME の下に書く" '[ -f "$XC/claude-review-inbox/patrol.conf" ]'
+
+echo "== --dry-run は何も変えず、聞く内容と操作を表示する"
+rm -f "$CONF"
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
 sig="$(tree_sig)"
 : >"$CALLS"
-if [ "$HAS_LOCAL" -eq 1 ]; then
-out="$("$REPO/install.sh" --dry-run --with-local </dev/null 2>&1)"
+out="$("$REPO/install.sh" --dry-run </dev/null 2>&1)"
 check "HOME が変わらず launchctl を呼ばない" '[ "$(tree_sig)" = "$sig" ] && [ ! -s "$CALLS" ]'
-check "登録する操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] launchctl bootstrap gui/$UIDN $AG/$U.skill-audit.plist"'
-fi
-out="$("$REPO/install.sh" --dry-run --with-schedule </dev/null 2>&1)"
-check "棚卸しも表示だけ" '[ "$(tree_sig)" = "$sig" ] && printf "%s" "$out" | grep -q "^\[dry-run\] launchctl bootstrap gui/$UIDN $LOOP_PLIST"'
+check "定期実行の問いと、y のときの3つの登録を表示する" 'has "[dry-run] 聞く: $Q_SCHEDULE" && has "[dry-run] launchctl bootstrap gui/$UIDN $AG/$U.memory-audit.plist" && has "[dry-run] launchctl bootstrap gui/$UIDN $AG/$U.feedback-mining.plist" && has "[dry-run] launchctl bootstrap gui/$UIDN $AG/$U.skill-audit.plist"'
+check "見回りの範囲の問いと書き先を表示する" 'has "[dry-run] 聞く: $Q_PERSONAL" && has "[dry-run] 聞く: $Q_REPOS" && has "[dry-run] 答えを書く: $CONF"'
+check "3つのフックを表示する" 'has "unread.sh）" && has "run-if-due.sh）" && has "session-trigger.sh）"'
+out="$("$REPO/install.sh" --dry-run --no-schedule </dev/null 2>&1)"
+check "--no-schedule の --dry-run は問いを表示しない" '! has "$Q_SCHEDULE"'
 
 echo
 printf 'RESULT: pass=%d fail=%d\n' "$pass" "$fail"

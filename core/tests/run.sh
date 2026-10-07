@@ -1,7 +1,7 @@
 #!/bin/bash
 # claude-review-inbox の検査をすべて動かす。本物の HOME・launchctl・brew には触れない。
 # 使い方: core/tests/run.sh [--core-only]
-#   --core-only  local/skills/*/scripts/test.sh と tools/test_export_public.sh を動かさない
+#   --core-only  tools/test_export_public.sh を動かさない（公開版の書き出しの中で、書き出した版を検査するときに使う）
 set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
@@ -27,23 +27,23 @@ run_test() {
 }
 
 run_test "core: 承認済みの判定・集計・案の作成" "$PYTHON" "$TESTS_DIR/test_approved.py"
+run_test "core: Markdown の整形" "$PYTHON" "$TESTS_DIR/test_markdown_lite.py"
 run_test "core: サーバー" "$PYTHON" "$TESTS_DIR/test_server.py"
-run_test "core: SessionStart フック" bash "$TESTS_DIR/test_hook.sh"
+run_test "core: 承認して反映" "$PYTHON" "$TESTS_DIR/test_apply.py"
 run_test "core: install.sh" bash "$TESTS_DIR/test_install.sh"
 run_test "core: install.sh の定期実行" bash "$TESTS_DIR/test_install_schedule.sh"
-run_test "core: 週1回の棚卸し（review-loop）" bash "$TESTS_DIR/test_review_loop.sh"
+run_test "core: install.sh の必要なものの確認" bash "$TESTS_DIR/test_install_prereq.sh"
 run_test "core: リンクの先の実体の許可と拒否" bash "$TESTS_DIR/test_link_scopes.sh"
 run_test "core: 消える記述の行き先" bash "$TESTS_DIR/test_destinations.sh"
-if [ "$core_only" -eq 0 ]; then
-  # 公開版の書き出しの検査は全部入りにだけある。
-  if [ -f "$REPO/tools/test_export_public.sh" ]; then
-    run_test "tools: 公開版の書き出し" bash "$REPO/tools/test_export_public.sh"
-  fi
-  for t in "$REPO"/local/skills/*/scripts/test.sh; do
-    [ -f "$t" ] || continue
-    s="${t%/scripts/test.sh}"
-    run_test "local: ${s##*/}" bash "$t"
-  done
+run_test "skill: memory-audit の作成したリポジトリの記録" bash "$REPO/core/skills/memory-audit/scripts/test-tag.sh"
+for t in "$REPO"/core/skills/*/scripts/test.sh; do
+  [ -f "$t" ] || continue
+  s="${t%/scripts/test.sh}"
+  run_test "skill: ${s##*/}" bash "$t"
+done
+# 公開版の書き出しの検査は全部入りにだけある。
+if [ "$core_only" -eq 0 ] && [ -f "$REPO/tools/test_export_public.sh" ]; then
+  run_test "tools: 公開版の書き出し" bash "$REPO/tools/test_export_public.sh"
 fi
 
 printf '\n==== 結果\n'

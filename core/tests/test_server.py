@@ -90,7 +90,16 @@ class ServerTest(unittest.TestCase):
             "CLAUDE_REVIEW_STATE": cls.sdir,
             "CLAUDE_REVIEW_SCAN_INTERVAL": "0.2",
             "CLAUDE_REVIEW_NOTIFY_CMD": notify,
+            # 本物の ~/claude-reports を読まないよう、レポートの置き場所も一時フォルダにする（最初は作らない）。
+            "CLAUDE_REPORTS_ROOT": os.path.join(cls.work, "reports"),
+            "CLAUDE_REPORTS_STATE": os.path.join(cls.work, "rstate"),
+            # 本物の ~/.claude/skills を読まないよう、スキルの置き場所も一時フォルダにする（最初は作らない）。
+            # リンクの先を「~/」で出すことを確かめるため、HOME も一時フォルダにする。
+            "CLAUDE_SKILLS_DIR": os.path.join(cls.work, "skills"),
+            "CLAUDE_SKILLS_EXCLUDE": "excluded-by-env, other",
+            "HOME": os.path.realpath(cls.work),
         })
+        cls.skills = os.path.join(cls.work, "skills")
         os.environ["CLAUDE_REVIEW_PROPOSALS"] = cls.pdir
         os.environ["CLAUDE_REVIEW_STATE"] = cls.sdir
         cls.proc = cls.start()
@@ -158,6 +167,7 @@ class ServerTest(unittest.TestCase):
             headers["Origin"] = "http://127.0.0.1:%d" % self.port
         elif origin:
             headers["Origin"] = origin
+        headers.update(kw.get("headers") or {})
         conn.putrequest("POST", path, skip_host=True)
         for k, v in headers.items():
             conn.putheader(k, v)
@@ -165,6 +175,9 @@ class ServerTest(unittest.TestCase):
         r = conn.getresponse()
         text = r.read().decode("utf-8")
         conn.close()
+        # Host・Origin の確認で拒んだときは、API でも HTML の 403 を返す（既存の拒否と同じ）
+        if not r.getheader("Content-Type", "").startswith("application/json"):
+            return r.status, text, r
         return r.status, json.loads(text), r
 
     def api_decide(self, name, to, note="", **kw):
@@ -241,7 +254,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn('<span class="add">+足す行</span>', text)
         self.assertIn('<span class="del">-消す行</span>', text)
         self.assertIn('<span class=""> 文脈の行</span>', text)
-        for label in ("承認する", "保留にする", "却下する"):
+        for label in ("承認して反映", "保留にする", "却下する"):
             self.assertIn(label, text)
         status, text, _ = self.request("GET", "/p/2026-10-04-01-done")
         self.assertIn("反映済みのため", text)
@@ -495,6 +508,318 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(status, 404, p)
         status, _, _ = self.request("GET", "/static/app.js", host="evil.example")
         self.assertEqual(status, 403)
+
+    # ---- 定期実行のレポート ----
+    def token(self):
+        _, text, _ = self.request("GET", "/")
+        return text.split('<meta name="review-token" content="')[1].split('"')[0]
+
+    def read_records(self):
+        path = os.path.join(self.work, "rstate", "report-inbox", "read.txt")
+        return read(path).splitlines() if os.path.exists(path) else []
+
+    def mark(self, payload, token=None, **kw):
+        return self.request_json("/api/reports/read", payload,
+                                 headers={"X-Review-Token": self.token() if token is None else token}, **kw)
+
+    def test_15_reports_toggle_hidden_without_jobs(self):
+        root = os.path.join(self.work, "reports")
+        self.assertFalse(os.path.exists(root))
+        _, text, _ = self.request("GET", "/")
+        self.assertNotIn('nav class="switch"', text)
+        # 置き場所はあるが、ジョブが無い（承認待ちと「.」で始まるディレクトリだけ）
+        os.makedirs(os.path.join(root, "proposals"))
+        os.makedirs(os.path.join(root, ".hidden"))
+        write(os.path.join(root, "top-level.md"), "x")
+        _, text, _ = self.request("GET", "/")
+        self.assertNotIn('nav class="switch"', text)
+
+    def test_16_reports_list(self):
+        root = os.path.join(self.work, "reports")
+        os.makedirs(os.path.join(root, "repo-patrol"), exist_ok=True)
+        os.makedirs(os.path.join(root, "feedback-mining"), exist_ok=True)
+        os.makedirs(os.path.join(root, "memory-audit", ".snapshots"), exist_ok=True)
+        for f in ("repo-patrol/2026-10-05.md", "repo-patrol/2026-10-07.md", "repo-patrol/2026-10-07-2.md",
+                  "feedback-mining/2026-10-07.md"):
+            write(os.path.join(root, f), "# %s\n" % f)
+        write(os.path.join(root, "memory-audit", "2026-10-06.md"), "<script>alert(1)</script> & 本文\n")
+        # 数えないもの
+        for f in ("proposals/2026-10-09.md", ".hidden/2026-10-09.md", "memory-audit/.snapshots/2026-10-09.md",
+                  "repo-patrol/notes.md", "repo-patrol/2026-10-09-x.md", "repo-patrol/2026-10-9.md"):
+            write(os.path.join(root, f), "x")
+        outside = os.path.join(self.work, "outside.md")
+        write(outside, "外のファイル")
+        os.symlink(outside, os.path.join(root, "repo-patrol", "2026-10-08.md"))
+
+        _, text, _ = self.request("GET", "/")
+        self.assertIn('<nav class="switch" aria-label="表示の切り替え"><a href="/" aria-current="page">承認待ち</a>'
+                      '<a href="/reports">レポート（未読 <span class="unread-count">5</span> 件）</a></nav>', text)
+        status, text, r = self.request("GET", "/reports")
+        self.assertEqual(status, 200)
+        self.assertIn('<a href="/reports" aria-current="page">', text)
+        self.assertIn('未読（<span class="count">5</span>件）', text)
+        self.assertIn('すべて（<span class="count">5</span>件）', text)
+        self.assertIn('<script src="/static/reports.js" defer></script>', text)
+        self.assertIn("未読をすべて既読にする", text)
+        keys = [x.split('"')[0] for x in text.split('data-path="')[1:]]
+        self.assertEqual(keys, ["repo-patrol/2026-10-07-2.md", "feedback-mining/2026-10-07.md",
+                                "repo-patrol/2026-10-07.md", "memory-audit/2026-10-06.md",
+                                "repo-patrol/2026-10-05.md"])
+        self.assertNotIn("<script>alert", text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt; &amp; 本文", text)
+        self.assertNotIn("外のファイル", text)
+        self.assertIn('<pre class="report-body">', text)
+        self.assertIn("script-src 'self'", r.getheader("Content-Security-Policy"))
+        status, text, _ = self.request("GET", "/static/reports.js")
+        self.assertEqual(status, 200)
+        self.assertNotRegex(text, r"\.innerHTML\s*=")
+
+    def test_17_reports_mark_read(self):
+        root = os.path.realpath(os.path.join(self.work, "reports"))
+        status, data, _ = self.mark({"paths": ["repo-patrol/2026-10-07-2.md"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"marked": 1, "counts": {"unread": 4, "all": 5}})
+        self.assertEqual(self.read_records(), [root + "/repo-patrol/2026-10-07-2.md"])
+        # 二重に足さない
+        status, data, _ = self.mark({"paths": ["repo-patrol/2026-10-07-2.md"]})
+        self.assertEqual(data["marked"], 0)
+        self.assertEqual(len(self.read_records()), 1)
+        _, text, _ = self.request("GET", "/reports")
+        self.assertNotIn('data-path="repo-patrol/2026-10-07-2.md"', text)
+        _, text, _ = self.request("GET", "/reports?view=all")
+        self.assertIn('data-path="repo-patrol/2026-10-07-2.md" data-read="1"', text)
+        # フォームの送信（JavaScript なし）
+        status, _, r = self.request("POST", "/api/reports/read",
+                                    {"token": self.token(), "path": "memory-audit/2026-10-06.md"})
+        self.assertEqual(status, 303)
+        self.assertEqual(r.getheader("Location"), "/reports?view=unread&read=memory-audit/2026-10-06.md")
+        _, text, _ = self.request("GET", r.getheader("Location"))
+        self.assertIn("memory-audit 2026-10-06.md を既読にしました。", text)
+        # すべて
+        status, data, _ = self.mark({"all": True})
+        self.assertEqual(data, {"marked": 3, "counts": {"unread": 0, "all": 5}})
+        recs = self.read_records()
+        self.assertEqual(len(recs), 5)
+        self.assertEqual(len(set(recs)), 5)
+        self.assertTrue(all(x.startswith(root + "/") for x in recs))
+        _, text, _ = self.request("GET", "/reports")
+        self.assertIn("未読のレポートはありません。", text)
+        self.assertNotIn("未読をすべて既読にする", text)
+        self.assertIn('レポート（未読 <span class="unread-count">0</span> 件）', text)
+
+    def test_18_reports_mark_read_rejected(self):
+        write(os.path.join(self.work, "reports", "feedback-mining", "2026-10-10.md"), "x")
+        before = self.read_records()
+        bad =["../outside.md", "repo-patrol/../../outside.md", "/etc/passwd", "repo-patrol/2026-10-08.md",
+               "repo-patrol/notes.md", "proposals/2026-10-09.md", ".hidden/2026-10-09.md",
+               "memory-audit/.snapshots/2026-10-09.md", "repo-patrol/2026-10-01.md", "repo-patrol", ""]
+        for k in bad:
+            status, _, _ = self.mark({"paths": ["feedback-mining/2026-10-10.md", k]})
+            self.assertEqual(status, 400, k)
+        for payload in ({}, {"paths": []}, {"paths": "repo-patrol/2026-10-05.md"}, {"paths": [1]}, {"all": "yes"}):
+            status, _, _ = self.mark(payload)
+            self.assertEqual(status, 400, payload)
+        # 合言葉と Origin
+        status, _, _ = self.mark({"all": True}, token="")
+        self.assertEqual(status, 403)
+        status, _, _ = self.mark({"all": True}, token="wrong")
+        self.assertEqual(status, 403)
+        status, _, _ = self.mark({"all": True}, origin=None)
+        self.assertEqual(status, 403)
+        status, _, _ = self.mark({"all": True}, origin="http://evil.example")
+        self.assertEqual(status, 403)
+        status, _, _ = self.request("POST", "/api/reports/read", {"all": "1"})
+        self.assertEqual(status, 403)
+        status, _, _ = self.request("POST", "/api/reports/read", {"token": self.token(), "path": "../outside.md"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.read_records(), before)
+
+    # ---- スキル ----
+    def make_skills(self):
+        """スキルの置き場所を作る。2回目以降は作り直さない。"""
+        sk = self.skills
+        if os.path.isdir(sk):
+            return sk
+        os.makedirs(os.path.join(sk, "beta", "references", "deep", "deeper"))
+        os.makedirs(os.path.join(sk, "beta", "history"))
+        os.makedirs(os.path.join(sk, "beta", ".snap"))
+        os.makedirs(os.path.join(sk, "beta", "node_modules", "pkg"))
+        write(os.path.join(sk, "beta", "SKILL.md"),
+              '---\nname: beta\ndescription: "%s"\nallowed-tools:\n  - Read\n---\n\n# ベータ\n\n'
+              '<script>alert(1)</script>\n\n[参照](references/guide.md) [外](../alpha/SKILL.md) '
+              '[危険](javascript:alert(1)) [無い](nothing.md)\n\n| 列 | 説明 |\n|---|---|\n| a | **b** |\n'
+              % ("ベータの説明。" + "あ" * 250))
+        write(os.path.join(sk, "beta", "references", "guide.md"), "# 手引き\n\n[戻る](../SKILL.md#top)\n")
+        write(os.path.join(sk, "beta", "references", "deep", "level3.md"), "# 3段目\n")
+        write(os.path.join(sk, "beta", "references", "deep", "deeper", "level4.md"), "# 4段目\n")
+        write(os.path.join(sk, "beta", "history", "old.md"), "# 古い\n")
+        write(os.path.join(sk, "beta", ".snap", "x.md"), "# 隠し\n")
+        write(os.path.join(sk, "beta", "node_modules", "pkg", "README.md"), "# 依存\n")
+        write(os.path.join(sk, "beta", "notes.txt"), "テキスト\n")
+        write(os.path.join(self.work, "secret-outside.md"), "外の秘密\n")
+        os.symlink(os.path.join(self.work, "secret-outside.md"), os.path.join(sk, "beta", "escape.md"))
+        os.makedirs(os.path.join(sk, "alpha"))
+        write(os.path.join(sk, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: アルファの説明\n---\n本文\n")
+        # 相対パスのリンク（本物の ~/.claude2/skills と同じ形）
+        ext = os.path.join(self.work, "agents", "linked")
+        os.makedirs(ext)
+        write(os.path.join(ext, "SKILL.md"), "---\nname: linked\ndescription: リンクの先のスキル\n---\n# リンク\n")
+        os.symlink(os.path.relpath(ext, sk), os.path.join(sk, "linked"))
+        # 数えないもの
+        for name in ("synced", ".hidden", "excluded-by-env"):
+            os.makedirs(os.path.join(sk, name))
+            write(os.path.join(sk, name, "SKILL.md"), "---\nname: %s\n---\n" % name)
+        os.makedirs(os.path.join(sk, "no-skill-md"))
+        write(os.path.join(sk, "no-skill-md", "README.md"), "x")
+        write(os.path.join(sk, "top-level.md"), "x")
+        os.symlink(os.path.join(self.work, "nowhere"), os.path.join(sk, "broken"))
+        return sk
+
+    def test_19_skills_toggle(self):
+        # スキルがまだ無い（置き場所が無い）ときは、スキルの項目を出さない
+        _, text, _ = self.request("GET", "/")
+        self.assertNotIn('href="/skills"', text)
+        self.make_skills()
+        _, text, _ = self.request("GET", "/")
+        self.assertIn('<nav class="switch" aria-label="表示の切り替え"><a href="/" aria-current="page">承認待ち</a>'
+                      '<a href="/reports">レポート（未読 <span class="unread-count">', text)
+        self.assertIn('<a href="/skills">スキル（3 件）</a></nav>', text)
+        _, text, _ = self.request("GET", "/reports")
+        self.assertIn('<a href="/skills">スキル（3 件）</a>', text)
+        _, text, _ = self.request("GET", "/skills")
+        self.assertIn('<a href="/skills" aria-current="page">スキル（3 件）</a>', text)
+        # レポートのジョブが無いときは「承認待ち」と「スキル」だけ
+        root = os.path.join(self.work, "reports")
+        moved = root + ".moved"
+        os.rename(root, moved)
+        try:
+            _, text, _ = self.request("GET", "/")
+            self.assertIn('<nav class="switch" aria-label="表示の切り替え"><a href="/" aria-current="page">承認待ち</a>'
+                          '<a href="/skills">スキル（3 件）</a></nav>', text)
+            # スキルも無ければトグルを出さない
+            os.rename(self.skills, self.skills + ".moved")
+            try:
+                _, text, _ = self.request("GET", "/")
+                self.assertNotIn('nav class="switch"', text)
+                status, text, _ = self.request("GET", "/skills")
+                self.assertEqual(status, 200)
+                self.assertIn("スキルはありません。置き場所（~/skills）にスキルのフォルダを置くと、ここに表示されます。", text)
+            finally:
+                os.rename(self.skills + ".moved", self.skills)
+        finally:
+            os.rename(moved, root)
+
+    def test_20_skills_list(self):
+        self.make_skills()
+        status, text, r = self.request("GET", "/skills")
+        self.assertEqual(status, 200)
+        names = [x.split('"')[0] for x in text.split('<h2><a href="/skills/')[1:]]
+        self.assertEqual(names, ["alpha", "beta", "linked"])
+        self.assertIn("アルファの説明", text)
+        # カードに出す説明は先頭 200 文字まで。絞り込みの対象（data-search）には全文を入れる
+        self.assertIn('<p class="text">ベータの説明。' + "あ" * 193 + "…</p>", text)
+        self.assertIn('data-search="beta ベータの説明。' + "あ" * 250 + '"', text)
+        self.assertIn('<dt>リンクの先</dt><dd class="path">~/agents/linked</dd>', text)
+        self.assertIn('<script src="/static/skills.js" defer></script>', text)
+        self.assertIn('id="skill-q"', text)
+        self.assertIn('data-search="alpha アルファの説明"', text)
+        self.assertIsNotNone(r.getheader("Content-Security-Policy"))
+        status, js, _ = self.request("GET", "/static/skills.js")
+        self.assertEqual(status, 200)
+        self.assertIn("skill-q", js)
+
+    def test_21_skill_detail(self):
+        self.make_skills()
+        status, text, _ = self.request("GET", "/skills/beta")
+        self.assertEqual(status, 200)
+        # 前付けは表、本文は整形する
+        self.assertIn("<tr><th>name</th><td>beta</td></tr>", text)
+        self.assertIn("<tr><th>allowed-tools</th><td>- Read</td></tr>", text)
+        self.assertIn("<h1>ベータ</h1>", text)
+        self.assertNotIn("<script>alert", text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", text)
+        self.assertIn('<div class="md-table"><table>', text)
+        self.assertIn("<strong>b</strong>", text)
+        # 同じスキルの中の .md へのリンクは書き換え、それ以外は文字のまま
+        self.assertIn('<a href="/skills/beta/references/guide.md">参照</a>', text)
+        self.assertIn("[外](../alpha/SKILL.md)", text)
+        self.assertIn("[危険](javascript:alert(1))", text)
+        self.assertIn("[無い](nothing.md)", text)
+        # ほかの .md の一覧。今開いているものに印を付ける。対象外の場所と深さ 4 は出さない
+        self.assertIn('<a href="/skills/beta/SKILL.md" aria-current="page">SKILL.md</a>（表示中）', text)
+        self.assertIn('<a href="/skills/beta/references/guide.md">references/guide.md</a>', text)
+        self.assertIn('<a href="/skills/beta/references/deep/level3.md">', text)
+        for hidden in ("level4.md", "history/old.md", ".snap/x.md", "node_modules", "escape.md", "notes.txt"):
+            self.assertNotIn(hidden, text, hidden)
+        # 編集・削除の手段は無い
+        self.assertNotIn("<form", text)
+        self.assertNotIn("<button", text)
+
+        status, text, _ = self.request("GET", "/skills/beta/references/guide.md")
+        self.assertEqual(status, 200)
+        self.assertIn("<h1>手引き</h1>", text)
+        self.assertIn('<a href="/skills/beta/SKILL.md#top">戻る</a>', text)
+        self.assertIn('<a href="/skills/beta/references/guide.md" aria-current="page">', text)
+        status, text, _ = self.request("GET", "/skills/linked")
+        self.assertEqual(status, 200)
+        self.assertIn("<h1>リンク</h1>", text)
+        self.assertIn("~/agents/linked", text)
+
+    def test_22_skill_not_found(self):
+        self.make_skills()
+        bad = ["/skills/nosuch", "/skills/synced", "/skills/.hidden", "/skills/excluded-by-env", "/skills/no-skill-md",
+               "/skills/broken", "/skills/top-level.md", "/skills/..", "/skills/beta/../alpha/SKILL.md",
+               "/skills/beta/%2e%2e/alpha/SKILL.md", "/skills/beta//etc/passwd", "/skills/beta/escape.md",
+               "/skills/beta/notes.txt", "/skills/beta/history/old.md", "/skills/beta/.snap/x.md",
+               "/skills/beta/node_modules/pkg/README.md", "/skills/beta/references/deep/deeper/level4.md",
+               "/skills/beta/references", "/skills/beta/nothing.md"]
+        for path in bad:
+            status, text, _ = self.request("GET", path)
+            self.assertEqual(status, 404, path)
+            self.assertNotIn("外の秘密", text)
+        self.assertIn("指定されたスキルまたはファイルはありません。スキルの一覧から選び直してください。", text)
+        self.assertNotIn("macOS の制限", text)
+
+    def test_23_skill_post_rejected(self):
+        self.make_skills()
+        for path in ("/skills", "/skills/beta", "/skills/beta/SKILL.md"):
+            status, _, r = self.request("POST", path, {"token": self.token(), "body": "x"})
+            self.assertEqual(status, 405, path)
+            self.assertEqual(r.getheader("Allow"), "GET, HEAD")
+        self.assertIn("# ベータ", read(os.path.join(self.skills, "beta", "SKILL.md")))
+
+    def test_24_skill_restricted(self):
+        # launchd から起動したサーバーが書類の中を開けない状態を、権限を外して再現する。
+        # ディレクトリは x だけ残し、SKILL.md の有無は確かめられるが一覧と読み込みはできない形にする。
+        self.make_skills()
+        locked = os.path.join(self.skills, "locked")
+        os.makedirs(locked)
+        write(os.path.join(locked, "SKILL.md"), "---\nname: locked\ndescription: 読めない説明\n---\n# 本文\n")
+        os.chmod(os.path.join(locked, "SKILL.md"), 0)
+        os.chmod(locked, 0o111)
+        try:
+            status, text, _ = self.request("GET", "/skills")
+            self.assertEqual(status, 200)
+            self.assertIn('<h2><a href="/skills/locked">locked</a></h2>', text)
+            self.assertIn("macOS の制限で説明を読み込めません。", text)
+            self.assertNotIn("読めない説明", text)
+            for path in ("/skills/locked", "/skills/locked/SKILL.md"):
+                status, text, _ = self.request("GET", path)
+                self.assertEqual(status, 200, path)
+                self.assertIn("<h1>locked</h1>", text)
+                self.assertIn("このスキルは macOS の制限で読み込めません。書類・デスクトップ・ダウンロードのフォルダの中にある"
+                              "ファイルは、この画面からは開けません。", text)
+                self.assertIn('実体の場所: <span class="path">~/skills/locked</span>', text)
+                self.assertIn("中身はファイルを直接開いて確認してください。", text)
+                self.assertNotIn("# 本文", text)
+            # パスの形が不正なものは、読めないスキルでも 404 のまま
+            for path in ("/skills/locked/../beta/SKILL.md", "/skills/locked/notes.txt"):
+                status, _, _ = self.request("GET", path)
+                self.assertEqual(status, 404, path)
+        finally:
+            os.chmod(locked, 0o755)
+            os.chmod(os.path.join(locked, "SKILL.md"), 0o644)
+            shutil.rmtree(locked)
 
 
 class NotifierTest(unittest.TestCase):

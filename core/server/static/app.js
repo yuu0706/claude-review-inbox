@@ -8,9 +8,14 @@
   var STATUS_LABEL = {
     pending: "承認待ち", approved: "承認済み", hold: "保留", rejected: "却下", applied: "反映済み"
   };
+  // apply は「承認して反映」。承認の記録に続けて、サーバーが差分を対象のファイルへ当てる。
   var BUTTON_LABEL = {
-    approved: "承認する", hold: "保留にする", rejected: "却下する", pending: "承認待ちに戻す"
+    apply: "承認して反映", hold: "保留にする", rejected: "却下する", pending: "承認待ちに戻す"
   };
+  var BUTTON_ORDER = ["apply", "hold", "rejected", "pending"];
+  var NEEDS_CLAUDE_LABEL = "Claude による反映が必要です（%s）。会話で「承認分を反映して」と伝えてください。";
+  var tokenEl = document.querySelector('meta[name="review-token"]');
+  var token = tokenEl ? tokenEl.getAttribute("content") : "";
   var DONE_LABEL = {
     approved: "承認しました", hold: "保留にしました", rejected: "却下しました", pending: "承認待ちに戻しました"
   };
@@ -128,6 +133,9 @@
       });
       card.appendChild(other);
     }
+    if (item.apply_block) {
+      card.appendChild(el("p", { "class": "needs" }, NEEDS_CLAUDE_LABEL.replace("%s", item.apply_block)));
+    }
     var err = el("p", { "class": "error", role: "alert" });
     err.hidden = true;
     card.appendChild(err);
@@ -135,6 +143,7 @@
     if (item.status !== "applied") {
       var nid = "note-" + item.id;
       var form = el("form", { "class": "decide", method: "post", action: "/p/" + encodeURIComponent(item.slug) + "/decide" });
+      form.appendChild(el("input", { type: "hidden", name: "token", value: token }));
       form.appendChild(el("label", { "for": nid }, "メモ（任意）"));
       form.appendChild(el("p", { "class": "help", id: nid + "-help" },
         "却下の理由を書くと否認リストに残り、同じ趣旨の案が再び出されなくなります。"));
@@ -142,7 +151,7 @@
       ta.value = item.note;
       form.appendChild(ta);
       var buttons = el("div", { "class": "buttons" });
-      ["approved", "hold", "rejected", "pending"].forEach(function (to) {
+      BUTTON_ORDER.forEach(function (to) {
         if (to !== item.status) {
           buttons.appendChild(el("button", { type: "submit", name: "to", value: to, "class": to }, BUTTON_LABEL[to]));
         }
@@ -343,11 +352,13 @@
     });
   }
 
-  function post(slug, to, note) {
-    return fetch("/api/proposals/" + encodeURIComponent(slug) + "/decide", {
+  function send(url, payload, extraHeaders) {
+    var headers = { "Content-Type": "application/json", Accept: "application/json" };
+    Object.keys(extraHeaders || {}).forEach(function (k) { headers[k] = extraHeaders[k]; });
+    return fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ to: to, note: note })
+      headers: headers,
+      body: JSON.stringify(payload)
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         if (!r.ok) {
@@ -356,6 +367,15 @@
         return data;
       });
     });
+  }
+
+  function post(slug, to, note) {
+    return send("/api/proposals/" + encodeURIComponent(slug) + "/decide", { to: to, note: note });
+  }
+
+  // 「承認して反映」。応答は { result, reason, message, item }。
+  function postApply(slug, note) {
+    return send("/api/proposals/" + encodeURIComponent(slug) + "/apply", { note: note }, { "X-Review-Token": token });
   }
 
   function replaceItem(updated) {
@@ -426,7 +446,11 @@
     errEl.hidden = true;
     setBusy(card, true);
     busy = true;
-    post(slug, to, note).then(function (updated) {
+    var request = to === "apply" ? postApply(slug, note) : post(slug, to, note).then(function (item) {
+      return { item: item, message: item.number + " を" + DONE_LABEL[to] };
+    });
+    request.then(function (res) {
+      var updated = res.item;
       busy = false;
       replaceItem(updated);
       if (updated.status !== current) {
@@ -435,7 +459,7 @@
       renderTabs();
       renderCards(true);
       var undo = null;
-      if (before && before.status !== "applied") {
+      if (before && before.status !== "applied" && updated.status !== "applied") {
         undo = function () {
           post(slug, before.status, before.note).then(function (restored) {
             replaceItem(restored);
@@ -447,7 +471,7 @@
           });
         };
       }
-      showToast(updated.number + " を" + DONE_LABEL[to], undo);
+      showToast(to === "apply" ? updated.number + ": " + res.message : res.message, undo);
     }, function (e) {
       busy = false;
       setBusy(card, false);

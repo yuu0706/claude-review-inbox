@@ -1,22 +1,25 @@
 #!/bin/bash
-# スキルの置き場所の直下にあるリンクの先の実体を、4つの定期実行のスクリプトが許可・拒否の規則に足すことの検査。local が無い版では review-loop だけを検査する。
-# HOME を一時ディレクトリに差し替え、--dry-run の出力だけを見る。claude は起動しない。
+# スキルの置き場所の直下にあるリンクの先の実体を、3つの定期実行のスクリプトが許可・拒否の規則に足すことの検査。
+# HOME を一時ディレクトリに差し替え、--dry-run の出力だけを見る。本物の claude は起動しない。
 set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$TESTS_DIR/../.." && pwd -P)"
-# 公開版（local が無い版）では、local のスクリプトの検査を飛ばす。
-HAS_LOCAL=0
-[ -d "$REPO/local/skills" ] && HAS_LOCAL=1
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/link-scopes-test.XXXXXX")"
 WORK="$(cd -P "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 
 export HOME="$WORK/home"
-unset CLAUDE_REPORTS_ROOT CLAUDE_REPORTS_STATE CLAUDE_REVIEW_PROPOSALS CLAUDE_REVIEW_STATE CLAUDE_REVIEW_LOOP_MODEL \
-  CLAUDE_REVIEW_LOOP_EFFORT SKILL_AUDIT_ROOT SKILL_AUDIT_STATE MEMORY_AUDIT_TARGETS FEEDBACK_MINING_SOURCES
+unset CLAUDE_REPORTS_ROOT CLAUDE_REPORTS_STATE CLAUDE_REVIEW_PROPOSALS CLAUDE_REVIEW_STATE \
+  SKILL_AUDIT_ROOT SKILL_AUDIT_STATE MEMORY_AUDIT_TARGETS FEEDBACK_MINING_SOURCES XDG_CONFIG_HOME CLAUDE_REVIEW_PATROL_CONF \
+  CLAUDE_LAUNCHER CLAUDE_REVIEW_DENY_READ
 export CHANGE_REVIEW_SCRIPTS="$REPO/core/skills/change-review/scripts"
 export SKILL_AUDIT_OWN_LINK_ROOTS="$WORK/own"
+# 設定ディレクトリを2つ持ち、スキルの実体を2つ目に置く形にする。起動するコマンドは偽の HOME の ~/.local/bin/claude になる。
+export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/.claude2"
+export SKILL_AUDIT_ROOT="$HOME/.claude2/skills"
+export SKILL_AUDIT_EXCLUDE="synced"
 
 pass=0
 fail=0
@@ -68,28 +71,19 @@ common_checks() {
   check "$name: 実体の無いリンクの規則を含まない" '! printf "%s" "$out" | grep -Fq "nosuch"'
 }
 
-if [ "$HAS_LOCAL" -eq 1 ]; then
 echo "== memory-audit"
-out="$("$REPO/local/skills/memory-audit/scripts/run.sh" --dry-run 2>&1)"; rc=$?
+out="$("$REPO/core/skills/memory-audit/scripts/run.sh" --dry-run 2>&1)"; rc=$?
 common_checks memory-audit "$out" "$rc"
 check "memory-audit: CLAUDE.md の実体の Edit を拒否する" '[ "$(count_arg "$out" "Edit(/$CMD_REAL)")" -ge 1 ]'
 check "memory-audit: リンクの先の実体の Edit を拒否する" '[ "$(count_arg "$out" "Edit(/$OWN/**)")" -eq 1 ] && [ "$(count_arg "$out" "Edit(/$EXT/**)")" -eq 1 ]'
 
 echo "== feedback-mining"
-out="$("$REPO/local/skills/feedback-mining/scripts/run.sh" --dry-run 2>&1)"; rc=$?
+out="$("$REPO/core/skills/feedback-mining/scripts/run.sh" --dry-run 2>&1)"; rc=$?
 common_checks feedback-mining "$out" "$rc"
 check "feedback-mining: CLAUDE.md の実体の Edit を拒否する" '[ "$(count_arg "$out" "Edit(/$CMD_REAL)")" -ge 1 ]'
 
-fi
-
-echo "== review-loop"
-out="$("$REPO/core/skills/review-loop/scripts/run.sh" --dry-run 2>&1)"; rc=$?
-common_checks review-loop "$out" "$rc"
-check "review-loop: リンクの先の実体の Edit を拒否する" '[ "$(count_arg "$out" "Edit(/$OWN/**)")" -eq 1 ]'
-
-if [ "$HAS_LOCAL" -eq 1 ]; then
 echo "== skill-audit"
-out="$("$REPO/local/skills/skill-audit/scripts/run-audit.sh" --force --dry-run 2>&1)"; rc=$?
+out="$("$REPO/core/skills/skill-audit/scripts/run-audit.sh" --force --dry-run 2>&1)"; rc=$?
 common_checks skill-audit "$out" "$rc"
 allow_part="${out%%--disallowedTools*}"
 deny_part="${out#*--disallowedTools}"
@@ -101,10 +95,10 @@ check "skill-audit: change-review の実体に Edit を許可しない" '[ "$(co
 check "skill-audit: CLAUDE.md の実体の Edit を拒否する" '[ "$(count_arg "$deny_part" "Edit(/$CMD_REAL)")" -eq 1 ]'
 
 echo "== skill-audit の対象の判定"
-. "$REPO/local/skills/skill-audit/scripts/lib.sh"
+. "$REPO/core/skills/skill-audit/scripts/lib.sh"
 check "自作のリンクは対象" 'is_target ownskill'
 check "外部のリンク・実体の無いリンク・synced は対象外" '! is_target extskill && ! is_target broken && ! is_target synced'
-check "trash-skill.sh はリンクのスキルを移動しない" '! "$REPO/local/skills/skill-audit/scripts/trash-skill.sh" ownskill >/dev/null 2>&1 && [ -L "$SK/ownskill" ]'
+check "trash-skill.sh はリンクのスキルを移動しない" '! "$REPO/core/skills/skill-audit/scripts/trash-skill.sh" ownskill >/dev/null 2>&1 && [ -L "$SK/ownskill" ]'
 
 echo "== skill-audit: 自作のリンクの実体への修正は戻して承認待ちにする（偽の claude）"
 cat >"$HOME/.local/bin/claude" <<EOF
@@ -114,16 +108,12 @@ printf 'added\n' >"$OWN/new.md"
 exit 0
 EOF
 chmod +x "$HOME/.local/bin/claude"
-"$REPO/local/skills/skill-audit/scripts/run-audit.sh" --force >/dev/null 2>&1; rc=$?
+"$REPO/core/skills/skill-audit/scripts/run-audit.sh" --force >/dev/null 2>&1; rc=$?
 check "skill-audit: 終了コード0" '[ "$rc" -eq 0 ]'
 check "skill-audit: 既存の行の修正は実行前の版に戻す" '[ "$(cat "$OWN/SKILL.md")" = "# own" ]'
 check "skill-audit: 新しいファイルは残す" '[ -f "$OWN/new.md" ]'
 check "skill-audit: 修正の承認待ちを作る" 'grep -lq "ownskill/SKILL.md" "$HOME/claude-reports/proposals/"*.md 2>/dev/null </dev/null'
 check "skill-audit: リンクはリンクのまま残る" '[ -L "$SK/ownskill" ]'
-
-else
-  echo "== memory-audit・feedback-mining・skill-audit: local が無いため飛ばす"
-fi
 
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

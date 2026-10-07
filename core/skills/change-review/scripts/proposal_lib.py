@@ -12,7 +12,7 @@ import re
 import tempfile
 
 STATUSES = ("pending", "approved", "hold", "rejected", "applied")
-# 画面のボタンで移れる状態。applied は反映の手順だけが書く。
+# 画面のボタンで移れる状態。applied は反映の手順（mark_applied）だけが書く。
 DECIDABLE = ("pending", "approved", "hold", "rejected")
 REJECTIONS_NAME = "rejections.md"
 # ファイル名: <YYYY-MM-DD>-<連番2桁>[-<短い名前>].md
@@ -217,30 +217,59 @@ def _yaml_str(v):
     return json.dumps(v, ensure_ascii=False)
 
 
-def rewrite_frontmatter(text, status, note, decided):
-    """status・note・decided の3行だけを書き換えた全文を返す。無い行は閉じの --- の前に足す。"""
+def update_frontmatter(text, values):
+    """values（キーの順を保つ (キー, 値の文字列) のリスト）の行だけを書き換えた全文を返す。
+
+    無い行は閉じの --- の前に足す。同じキーの行が複数あれば最初の行だけを残す。
+    """
     fm, body = split_frontmatter(text)
     if fm is None:
         raise ValueError("frontmatter がありません")
     newline = "\r\n" if fm[0].endswith("\r\n") else "\n"
-    values = {"status": status, "note": _yaml_str(note), "decided": decided}
+    vals = dict(values)
+    keys = [k for k, _ in values]
+    key_re = re.compile(r"^(%s):" % "|".join(re.escape(k) for k in keys))
     done = set()
     out = [fm[0]]
     for raw in fm[1:-1]:
-        m = re.match(r"^(status|note|decided):", raw)
+        m = key_re.match(raw)
         if m:
             key = m.group(1)
             if key in done:
                 continue
-            out.append("%s: %s%s" % (key, values[key], newline))
+            out.append("%s: %s%s" % (key, vals[key], newline))
             done.add(key)
         else:
             out.append(raw)
-    for key in ("status", "note", "decided"):
+    for key in keys:
         if key not in done:
-            out.append("%s: %s%s" % (key, values[key], newline))
+            out.append("%s: %s%s" % (key, vals[key], newline))
     out.append(fm[-1])
     return "".join(out) + body
+
+
+def rewrite_frontmatter(text, status, note, decided):
+    """status・note・decided の3行だけを書き換えた全文を返す。無い行は閉じの --- の前に足す。"""
+    return update_frontmatter(text, [("status", status), ("note", _yaml_str(note)), ("decided", decided)])
+
+
+def mark_applied(path, when, note):
+    """反映が済んだ案を status: applied にし、applied の日時を書き、台帳に to: applied の行を足す。
+
+    台帳へ書けなければ、案のファイルを元に戻して例外を投げ直す。
+    """
+    p = read_proposal(path)
+    if p.status != "approved":
+        raise ValueError("承認済みではない案は反映済みにできません")
+    new_text = update_frontmatter(p.text, [("status", "applied"), ("applied", when)])
+    atomic_write(path, new_text)
+    newp = read_proposal(path)
+    try:
+        append_ledger(newp.id, "applied", note, newp.sha256)
+    except BaseException:
+        atomic_write(path, p.text)
+        raise
+    return newp
 
 
 def _cell(v):

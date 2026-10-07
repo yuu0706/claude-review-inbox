@@ -24,13 +24,13 @@ path_and_real() {
   return 0
 }
 
-# スキルの置き場所の一覧を出力する。引数が無ければ ~/.claude/skills と、存在すれば ~/.claude2/skills。
+# スキルの置き場所の一覧を出力する。引数が無ければ ~/.claude/skills。
+# 2つ目の設定ディレクトリを使う場合は、呼び出し側がその skills も引数で渡す。
 skill_locations() {
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@"
   else
     printf '%s\n' "$HOME/.claude/skills"
-    [ -d "$HOME/.claude2/skills" ] && printf '%s\n' "$HOME/.claude2/skills"
   fi
   return 0
 }
