@@ -1,6 +1,8 @@
 #!/bin/bash
 # tag-memory-repo.sh と backfill-memory-repo.sh の検査。HOME を一時ディレクトリに差し替え、偽のメモリと偽のリポジトリを作って実行する。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/memory-tag-test.XXXXXX")"
@@ -21,8 +23,8 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 
 # 偽のリポジトリ。ハイフンを含む名前をサブディレクトリの下にも置く。
 GIT="$HOME/Documents/git"
-mkdir -p "$GIT/sample-api" "$GIT/special/sample-special-cms" "$GIT/special/sample-special" "$GIT/plain-dir" "$WORK/outside"
-for r in "$GIT/sample-api" "$GIT/special/sample-special-cms" "$GIT/special/sample-special"; do
+mkdir -p "$GIT/sample-api" "$GIT/group-a/sample-app-cms" "$GIT/group-a/sample-app" "$GIT/plain-dir" "$WORK/outside"
+for r in "$GIT/sample-api" "$GIT/group-a/sample-app-cms" "$GIT/group-a/sample-app"; do
   git init -q "$r"
 done
 
@@ -54,7 +56,7 @@ check "フック: 2行は metadata の塊の末尾に入る" '[ "$(sed -n 5,7p "
 check "フック: 本文は1バイトも変わらない" '[ "$(tail -n +9 "$f"; printf x)" = "$(printf "%s" "$BODY"; printf x)" ]'
 
 before="$(cat "$f"; printf x)"
-run_hook Edit "$f" "$GIT/special/sample-special-cms"
+run_hook Edit "$f" "$GIT/group-a/sample-app-cms"
 check "フック: Edit で再実行しても値が変わらない" '[ "$(cat "$f"; printf x)" = "$before" ]'
 
 f="$MEM/MEMORY.md"
@@ -109,8 +111,8 @@ check "フック: 1秒以内に終わる" '[ $(( $(date +%s) - start )) -le 1 ]'
 # --- 埋め戻し ---
 
 rm -rf "$HOME/.claude/projects"
-P1="$HOME/.claude/projects/$(printf '%s' "$GIT/special/sample-special-cms" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
-P2="$HOME/.claude2/projects/$(printf '%s' "$GIT/sample-api/src" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
+P1="$HOME/.claude/projects/$(printf '%s' "$GIT/group-a/sample-app-cms" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
+P2="$HOME/${ALT_DIR}/projects/$(printf '%s' "$GIT/sample-api/src" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
 P3="$HOME/.claude/projects/$(printf '%s' "$HOME" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
 P4="$HOME/.claude/projects/$(printf '%s' "$GIT/plain-dir" | sed 's/[^A-Za-z0-9-]/-/g')/memory"
 mkdir -p "$P1" "$P2" "$P3" "$P4"
@@ -122,26 +124,26 @@ printf -- '---\nname: b\nmetadata:\n  type: project\n  repo: existing\n  repo_pa
 
 out="$("$BACKFILL")"
 check "埋め戻し: 設定ディレクトリの指定が無ければ ~/.claude だけを見る" \
-  'printf "%s\n" "$out" | grep -q "^$P1/a.md	" && ! printf "%s\n" "$out" | grep -q "^$HOME/.claude2/"'
-printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude2\n' >"$CLAUDE_REVIEW_JOBS_CONF"
+  'printf "%s\n" "$out" | grep -q "^$P1/a.md	" && ! printf "%s\n" "$out" | grep -q "^$HOME/${ALT_DIR}/"'
+printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/%s\n' "$ALT_DIR" >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$("$BACKFILL")"
 check "埋め戻し: jobs.conf の設定ディレクトリを使う" \
   'printf "%s\n" "$out" | grep -q "^$P2/a.md	" && ! printf "%s\n" "$out" | grep -q "^$P1/a.md	"'
 rm -f "$CLAUDE_REVIEW_JOBS_CONF"
-export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:~/.claude2"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:~/${ALT_DIR}"
 
 snap="$WORK/snap"
-mkdir -p "$snap" && cp -Rp "$HOME/.claude" "$HOME/.claude2" "$snap/"
+mkdir -p "$snap" && cp -Rp "$HOME/.claude" "$HOME/${ALT_DIR}" "$snap/"
 out="$("$BACKFILL")"; rc=$?
 check "埋め戻し: 既定は終了コード0" '[ "$rc" -eq 0 ]'
-check "埋め戻し: 既定では変更しない" 'diff -r "$snap/.claude" "$HOME/.claude" >/dev/null && diff -r "$snap/.claude2" "$HOME/.claude2" >/dev/null'
-check "埋め戻し: 既定でも一覧を出す" 'printf "%s\n" "$out" | grep -q "^$P1/a.md	sample-special-cms	"'
+check "埋め戻し: 既定では変更しない" 'diff -r "$snap/.claude" "$HOME/.claude" >/dev/null && diff -r "$snap/${ALT_DIR}" "$HOME/${ALT_DIR}" >/dev/null'
+check "埋め戻し: 既定でも一覧を出す" 'printf "%s\n" "$out" | grep -q "^$P1/a.md	sample-app-cms	"'
 check "埋め戻し: 最後に件数を出す" 'printf "%s\n" "$out" | tail -n 1 | grep -q "^件数: 対象"'
 
 out="$("$BACKFILL" --apply)"; rc=$?
 check "埋め戻し: --apply は終了コード0" '[ "$rc" -eq 0 ]'
-check "埋め戻し: --apply で足される" 'grep -qx "  repo: sample-special-cms" "$P1/a.md" && grep -qx "  repo_path: $GIT/special/sample-special-cms" "$P1/a.md"'
-check "埋め戻し: ハイフンを含むサブディレクトリのリポジトリ名を正しく戻す（sample-special と取り違えない）" '! grep -q "repo: sample-special$" "$P1/a.md"'
+check "埋め戻し: --apply で足される" 'grep -qx "  repo: sample-app-cms" "$P1/a.md" && grep -qx "  repo_path: $GIT/group-a/sample-app-cms" "$P1/a.md"'
+check "埋め戻し: ハイフンを含むサブディレクトリのリポジトリ名を正しく戻す（sample-app と取り違えない）" '! grep -q "repo: sample-app$" "$P1/a.md"'
 check "埋め戻し: リポジトリの下のディレクトリはリポジトリの最上位に戻す" 'grep -qx "  repo: sample-api" "$P2/a.md" && grep -qx "  repo_path: $GIT/sample-api" "$P2/a.md"'
 check "埋め戻し: ホームは repo: なし・repo_path: 不明" 'grep -qx "  repo: なし" "$P3/a.md" && grep -qx "  repo_path: 不明" "$P3/a.md"'
 check "埋め戻し: git でないディレクトリは repo: なし・repo_path はそのディレクトリ" 'grep -qx "  repo: なし" "$P4/a.md" && grep -qx "  repo_path: $GIT/plain-dir" "$P4/a.md"'

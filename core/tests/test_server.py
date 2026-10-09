@@ -660,7 +660,7 @@ class ServerTest(unittest.TestCase):
         os.symlink(os.path.join(self.work, "secret-outside.md"), os.path.join(sk, "beta", "escape.md"))
         os.makedirs(os.path.join(sk, "alpha"))
         write(os.path.join(sk, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: アルファの説明\n---\n本文\n")
-        # 相対パスのリンク（本物の ~/.claude2/skills と同じ形）
+        # 相対パスのリンク（2つ目の設定ディレクトリの skills と同じ形）
         ext = os.path.join(self.work, "agents", "linked")
         os.makedirs(ext)
         write(os.path.join(ext, "SKILL.md"), "---\nname: linked\ndescription: リンクの先のスキル\n---\n# リンク\n")

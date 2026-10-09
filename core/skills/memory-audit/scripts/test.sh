@@ -1,6 +1,9 @@
 #!/bin/bash
 # memory-audit scripts の検査。HOME を一時ディレクトリに差し替え、偽のメモリを作って実行する。実際の claude は起動しない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+# 期待値の並び順が .claude/ の後になるよう、「/」より後に並ぶ文字（_）で区切る。
+ALT_DIR=.claude_alt
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/memory-audit-test.XXXXXX")"
@@ -14,7 +17,7 @@ unset MEMORY_AUDIT_TARGETS CLAUDE_REVIEW_PROPOSALS CLAUDE_REVIEW_STATE XDG_CONFI
 # 起動するコマンドは常に偽物にする（本物の claude を起動しない）。共通の設定ファイルは一時の場所を指す。
 export CLAUDE_LAUNCHER="$WORK/fake-claude"
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
-export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/.claude2"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
 # 承認待ちの案を作るスクリプトは、リポジトリの core のものを使う。
 CR_REAL="$(cd "$SCRIPT_DIR/../../change-review/scripts" && pwd -P)"
 export CHANGE_REVIEW_SCRIPTS="$CR_REAL"
@@ -32,14 +35,14 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 
 # 偽の HOME。設定ディレクトリを2つ持つ形にする。
 mkdir -p "$HOME/.claude/projects/proj-a/memory" "$HOME/.claude/projects/proj-b" \
-  "$HOME/.claude2/projects/proj-c/memory/sub"
+  "$HOME/${ALT_DIR}/projects/proj-c/memory/sub"
 echo "a1" >"$HOME/.claude/projects/proj-a/memory/a.md"
-echo "c1" >"$HOME/.claude2/projects/proj-c/memory/sub/c.md"
+echo "c1" >"$HOME/${ALT_DIR}/projects/proj-c/memory/sub/c.md"
 M_A="$HOME/.claude/projects/proj-a/memory"
-M_C="$HOME/.claude2/projects/proj-c/memory"
+M_C="$HOME/${ALT_DIR}/projects/proj-c/memory"
 # 作業用のフォルダの中での位置。.claude で始まる要素は先頭のドットを外して写される。
 S_A="$HOME/claude/projects/proj-a/memory"
-S_C="$HOME/claude2/projects/proj-c/memory"
+S_C="$HOME/${ALT_DIR#.}/projects/proj-c/memory"
 
 # レポートを書く偽の claude。受け取った引数を記録し、依頼文から書き込み先（.staging）を読んで STAGE に入れ、
 # FAKE_HOOK のコマンドを実行する（直した版を書く処理を検査ごとに差し替える）。
@@ -88,8 +91,8 @@ for rule in "'$FAKE' '-p'" "Skill memory-audit を自動モードで実行する
   "/deletions.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く。" \
   "'Edit(/$HOME/Documents/**)' 'Edit(/$PDIR/**)' 'Edit(/$LEDGER/**)'" \
   "'Edit(/$HOME/.claude/CLAUDE.md)' 'Edit(/$HOME/.claude/settings.json)' 'Edit(/$HOME/.claude/skills/**)'" \
-  "'Edit(/$HOME/.claude2/CLAUDE.md)' 'Edit(/$HOME/.claude2/settings.json)' 'Edit(/$HOME/.claude2/skills/**)'" \
-  "'Read(/$HOME/.claude/**)' 'Read(/$HOME/.claude2/**)'" \
+  "'Edit(/$HOME/${ALT_DIR}/CLAUDE.md)' 'Edit(/$HOME/${ALT_DIR}/settings.json)' 'Edit(/$HOME/${ALT_DIR}/skills/**)'" \
+  "'Read(/$HOME/.claude/**)' 'Read(/$HOME/${ALT_DIR}/**)'" \
   "'Read(/$HOME/.config/claude-skills/memory-audit.local.md)'" \
   "利用者の環境だけの決まりは $HOME/.config/claude-skills/memory-audit.local.md にある（無ければ飛ばす）。" \
   "'--disallowedTools' 'Read(/$HOME/Library/CloudStorage/**)' 'Edit(/$RDIR/.snapshots/**)'" \
@@ -228,7 +231,7 @@ check "ログに理由が書かれる" 'grep -q "複製に失敗しました" "$
 
 echo "== 設定ファイルで対象を変えられる"
 conf="$WORK/targets-one.conf"
-printf '# 1か所に絞る\n\n~/.claude2/projects/*/memory\n$HOME/nosuch/*/memory\n' >"$conf"
+printf '# 1か所に絞る\n\n~/%s/projects/*/memory\n$HOME/nosuch/*/memory\n' "$ALT_DIR" >"$conf"
 out="$(MEMORY_AUDIT_TARGETS="$conf" "$SCRIPT_DIR/run.sh" --dry-run)"
 check "対象は1件" '[ "$(printf "%s\n" "$out" | grep -c "^TARGET: ")" = "1" ] && printf "%s" "$out" | grep -Fxq "TARGET: $M_C"'
 check "許可は対象の1件だけ" '! printf "%s" "$out" | grep -Fq "Edit(/$M_A/**)"'
@@ -257,7 +260,7 @@ check "{job} をジョブ名に置き換え、語ごとに渡す" 'printf "%s" "
 printf 'CLAUDE_LAUNCHER=~/bin/launcher {job}\nCLAUDE_REVIEW_CONFIG_DIRS=~/.claude\nCLAUDE_REVIEW_DENY_READ=~/sync-a:/opt/sync-b\n' >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$(env -u CLAUDE_LAUNCHER -u CLAUDE_REVIEW_CONFIG_DIRS "$SCRIPT_DIR/run.sh" --dry-run)"
 check "設定ファイルの起動コマンドを使い、~ を展開する" 'printf "%s" "$out" | grep -Fq "&& '"'"'$HOME/bin/launcher'"'"' '"'"'memory-audit'"'"' '"'"'-p'"'"'"'
-check "設定ファイルの設定ディレクトリだけを対象にする" '[ "$(printf "%s\n" "$out" | grep -c "^TARGET: ")" = "1" ] && ! printf "%s" "$out" | grep -Fq ".claude2"'
+check "設定ファイルの設定ディレクトリだけを対象にする" '[ "$(printf "%s\n" "$out" | grep -c "^TARGET: ")" = "1" ] && ! printf "%s" "$out" | grep -Fq "${ALT_DIR}"'
 check "設定ファイルの読み取りの拒否を足す" 'printf "%s" "$out" | grep -Fq "'"'"'Read(/$HOME/sync-a/**)'"'"' '"'"'Read(//opt/sync-b/**)'"'"'"'
 out="$(CLAUDE_LAUNCHER=/opt/env-launcher "$SCRIPT_DIR/run.sh" --dry-run)"
 check "環境変数が設定ファイルより優先する" 'printf "%s" "$out" | grep -Fq "&& '"'"'/opt/env-launcher'"'"' '"'"'-p'"'"'"'

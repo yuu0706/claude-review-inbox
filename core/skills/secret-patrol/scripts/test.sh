@@ -2,6 +2,8 @@
 # secret-patrol scripts の検査。一時ディレクトリに偽の利用者の環境と偽の gitleaks を作って実行する。
 # 実際の ~/Documents・~/Downloads・~/.claude は読まない。ネットワークは使わない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/secret-patrol-test.XXXXXX")"
@@ -22,7 +24,7 @@ printf 'PERSONAL_FOLDERS=yes\nREPO_ROOTS=%s\n' "$H/Documents/git:$H/dev" >"$CLAU
 # 設定ディレクトリを2つ持つ形にし、スキルの除外とフックの判定の文字列を与える。共通の設定ファイルは一時の場所を指す。
 unset XDG_CONFIG_HOME
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
-export CLAUDE_REVIEW_CONFIG_DIRS="$H/.claude:$H/.claude2"
+export CLAUDE_REVIEW_CONFIG_DIRS="$H/.claude:$H/${ALT_DIR}"
 export SECRET_PATROL_SKILL_EXCLUDES="synced"
 export SECRET_PATROL_HOOK_PATTERN="hooks/secret-scan.sh"
 STATE="$CLAUDE_REPORTS_STATE/secret-patrol"
@@ -121,19 +123,19 @@ export PATH="$WORK/bin:$PATH"
 
 # ---- 偽の利用者の環境 ----
 q() { git -C "$1" "${@:2}" >/dev/null 2>&1; }
-mkdir -p "$H/.claude/projects/p1/memory" "$H/.claude2/skills/s1/history" "$H/.claude2/skills/synced/x" \
-  "$H/.claude2/skills/.hidden" "$H/.claude2/rules" "$H/Downloads" "$H/Desktop" "$H/Documents/git/special" "$H/dev"
+mkdir -p "$H/.claude/projects/p1/memory" "$H/${ALT_DIR}/skills/s1/history" "$H/${ALT_DIR}/skills/synced/x" \
+  "$H/${ALT_DIR}/skills/.hidden" "$H/${ALT_DIR}/rules" "$H/Downloads" "$H/Desktop" "$H/Documents/git/group-a" "$H/dev"
 echo "token FAKESECRET_mem1" >"$H/.claude/projects/p1/memory/note.md"
-printf 'line\nkey FAKESECRET_skill1\n' >"$H/.claude2/skills/s1/SKILL.md"
-echo "FAKESECRET_hist" >"$H/.claude2/skills/s1/history/old.md"
-echo "FAKESECRET_synced" >"$H/.claude2/skills/synced/x/SKILL.md"
-echo "FAKESECRET_hidden" >"$H/.claude2/skills/.hidden/a.md"
-echo "# rules" >"$H/.claude2/CLAUDE.md"
+printf 'line\nkey FAKESECRET_skill1\n' >"$H/${ALT_DIR}/skills/s1/SKILL.md"
+echo "FAKESECRET_hist" >"$H/${ALT_DIR}/skills/s1/history/old.md"
+echo "FAKESECRET_synced" >"$H/${ALT_DIR}/skills/synced/x/SKILL.md"
+echo "FAKESECRET_hidden" >"$H/${ALT_DIR}/skills/.hidden/a.md"
+echo "# rules" >"$H/${ALT_DIR}/CLAUDE.md"
 cat >"$H/.claude/settings.json" <<'EOF'
 {"permissions": {"deny": ["Read(//**/.env)", "Read(//**/.env.*)", "Read(~/.aws/credentials)", "Read(~/.ssh/**)", "Read(//**/*.pem)", "Read(//**/*.key)"]},
  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "~/.claude/hooks/secret-scan.sh"}]}]}}
 EOF
-cat >"$H/.claude2/settings.json" <<'EOF'
+cat >"$H/${ALT_DIR}/settings.json" <<'EOF'
 {"permissions": {"deny": ["Read(//**/.env)", "Read(**/*.pem)", "Read(~/.ssh/**)", "Read(//**/*.key)"]}, "hooks": {}}
 EOF
 
@@ -158,9 +160,9 @@ echo "FAKESECRET_nested" >"$H/Documents/git/repo1/repos/inner/x.txt"
 mkdir -p "$WORK/outside"; echo "FAKESECRET_outside" >"$WORK/outside/s.txt"
 ln -s "$WORK/outside/s.txt" "$H/Documents/git/repo1/link.txt"
 # repo2: まとめフォルダの中。上流なし。
-git init -q "$H/Documents/git/special/repo2"
-echo "FAKESECRET_r2" >"$H/Documents/git/special/repo2/app.txt"
-q "$H/Documents/git/special/repo2" add .; q "$H/Documents/git/special/repo2" commit -m "初期"
+git init -q "$H/Documents/git/group-a/repo2"
+echo "FAKESECRET_r2" >"$H/Documents/git/group-a/repo2/app.txt"
+q "$H/Documents/git/group-a/repo2" add .; q "$H/Documents/git/group-a/repo2" commit -m "初期"
 # repo3: ~/dev の下。push 済みで秘密なし。個人情報らしき CSV を持つ。node_modules の CSV は除く。
 git clone -q "$WORK/remote/origin.git" "$H/dev/repo3"
 mkdir -p "$H/dev/repo3/node_modules/x"
@@ -186,7 +188,7 @@ snapshot() {
   (cd "$H" && find . -path ./Downloads/locked -prune -o -type f -print | LC_ALL=C sort | while IFS= read -r f; do
     printf '%s %s\n' "$(md5 -q "$f")" "$f"
   done)
-  for r in "$H/Documents/git/repo1" "$H/Documents/git/special/repo2" "$H/dev/repo3"; do
+  for r in "$H/Documents/git/repo1" "$H/Documents/git/group-a/repo2" "$H/dev/repo3"; do
     git -C "$r" status --porcelain; git -C "$r" for-each-ref
   done
 }
@@ -209,7 +211,7 @@ has() { grep -Fq -- "$1" "$rep"; }
 section() { awk -v h="## $1" '$0==h{f=1;next} /^## /{f=0} f' "$rep"; }
 new="$(section "新規の秘密")"
 check "a: メモリの秘密が新規" 'printf "%s" "$new" | grep -Fq "| a | ~/.claude/projects/p1/memory/note.md:1 | fake-rule | - |"'
-check "a: スキルの秘密が新規" 'printf "%s" "$new" | grep -Fq "| a | ~/.claude2/skills/s1/SKILL.md:2 | fake-rule | - |"'
+check "a: スキルの秘密が新規" 'printf "%s" "$new" | grep -Fq "| a | ~/${ALT_DIR}/skills/s1/SKILL.md:2 | fake-rule | - |"'
 check "a: synced・. で始まるディレクトリ・history は除く" \
   '! printf "%s" "$new" | grep -Eq "synced|\.hidden|history"'
 check "b: 作業ツリーの秘密が新規" 'printf "%s" "$new" | grep -Fq "| b（作業ツリー） | ~/Documents/git/repo1/config.txt:1 |"'
@@ -227,7 +229,7 @@ c1="$(git -C "$H/Documents/git/repo1" rev-parse --short=7 HEAD)"
 check "b: 未push のコミットの秘密がコミット付きで新規" \
   'printf "%s" "$new" | grep -Fq "| b（未push） | ~/Documents/git/repo1/added.txt:1 | fake-rule | $c1 |"'
 check "b: 上流の無いまとめフォルダの中のリポジトリも見る" \
-  'printf "%s" "$new" | grep -Fq "| b（未push） | ~/Documents/git/special/repo2/app.txt:1 |"'
+  'printf "%s" "$new" | grep -Fq "| b（未push） | ~/Documents/git/group-a/repo2/app.txt:1 |"'
 check "b: push 済みの初期コミットは見ない" '! printf "%s" "$new" | grep "未push" | grep -Fq "readme.txt"'
 check "b: 深さ3のリポジトリは見ない" '! has "deep"'
 check "上流ありは @{u}..HEAD、上流なしは --branches --not --remotes で調べる" \
@@ -247,8 +249,8 @@ check "c: 中身を書かない" '! has "example.jp" &&! has "test_user_"'
 grd="$(section "守りの設定")"
 check "d: ~/.claude/settings.json は 6つ中6つ・hook あり" \
   'printf "%s" "$grd" | grep -Fq "| ~/.claude/settings.json | 6つ中6つ | あり |"'
-check "d: 混在の ~/.claude2/settings.json は 6つ中3つ・古い書き方を未設定と分けて書く・hook なし（未設定）" \
-  'printf "%s" "$grd" | grep "~/.claude2/settings.json" | grep -Fq "6つ中3つ（未設定: Read(//**/.env.*)、Read(~/.aws/credentials)、書き方が古い（作業場所の外を止めない）: Read(**/*.pem)）" &&printf "%s" "$grd" | grep "~/.claude2/settings.json" | grep -Fq "なし（未設定）"'
+check "d: 混在の ~/${ALT_DIR}/settings.json は 6つ中3つ・古い書き方を未設定と分けて書く・hook なし（未設定）" \
+  'printf "%s" "$grd" | grep "~/${ALT_DIR}/settings.json" | grep -Fq "6つ中3つ（未設定: Read(//**/.env.*)、Read(~/.aws/credentials)、書き方が古い（作業場所の外を止めない）: Read(**/*.pem)）" &&printf "%s" "$grd" | grep "~/${ALT_DIR}/settings.json" | grep -Fq "なし（未設定）"'
 check "読めなかった対象は該当なし" '[ "$(section "読めなかった対象" | grep -v "^$")" = "該当なし" ]'
 check "既知は該当なし（初回）" '[ "$(section "既知" | grep -v "^$")" = "該当なし" ]'
 check "baseline が保存される" '[ -n "$(ls "$BASE"/a-*.json "$BASE"/bt-tree-*.json "$BASE"/bg-git-*.json 2>/dev/null)" ]'
@@ -326,24 +328,24 @@ lastlog="$(ls "$STATE/logs/"*.log | tail -1)"
 check "ログに ERROR の行がある" 'grep -Eq "^\[[^]]+\] ERROR: 読めなかった対象: ~/Downloads/locked" "$lastlog"'
 
 echo "== settings.json が無い・壊れている"
-mv "$H/.claude2/settings.json" "$WORK/settings.bak"
+mv "$H/${ALT_DIR}/settings.json" "$WORK/settings.bak"
 out="$("$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
 rc=$?
-check "無い場合は失敗にしない" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -Fq "| ~/.claude2/settings.json | ファイルが存在しません | - |"'
-echo "{ broken" >"$H/.claude2/settings.json"
+check "無い場合は失敗にしない" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -Fq "| ~/${ALT_DIR}/settings.json | ファイルが存在しません | - |"'
+echo "{ broken" >"$H/${ALT_DIR}/settings.json"
 out="$("$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
 rc=$?
 check "壊れている場合は読めなかった対象として失敗にする" \
-  '[ "$rc" -eq 1 ] && printf "%s" "$out" | grep -Fq "| ~/.claude2/settings.json | JSON として解析できませんでした |"'
-cat >"$H/.claude2/settings.json" <<'EOF'
+  '[ "$rc" -eq 1 ] && printf "%s" "$out" | grep -Fq "| ~/${ALT_DIR}/settings.json | JSON として解析できませんでした |"'
+cat >"$H/${ALT_DIR}/settings.json" <<'EOF'
 {"permissions": {"deny": ["Read(**/.env)", "Read(**/.env.*)", "Read(~/.aws/credentials)", "Read(~/.ssh/**)", "Read(**/*.pem)", "Read(**/*.key)"]}}
 EOF
 out="$("$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
 rc=$?
 check "d: 古い書き方だけの場合は設定済みに数えず「書き方が古い」と書く（失敗にはしない）" \
-  '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep "~/.claude2/settings.json" | grep -Fq "6つ中2つ（書き方が古い（作業場所の外を止めない）: Read(**/.env)、Read(**/.env.*)、Read(**/*.pem)、Read(**/*.key)）"'
-check "d: 古い書き方だけの場合に「未設定」とは書かない" '! printf "%s" "$out" | grep "~/.claude2/settings.json" | grep -Fq "未設定:"'
-mv "$WORK/settings.bak" "$H/.claude2/settings.json"
+  '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep "~/${ALT_DIR}/settings.json" | grep -Fq "6つ中2つ（書き方が古い（作業場所の外を止めない）: Read(**/.env)、Read(**/.env.*)、Read(**/*.pem)、Read(**/*.key)）"'
+check "d: 古い書き方だけの場合に「未設定」とは書かない" '! printf "%s" "$out" | grep "~/${ALT_DIR}/settings.json" | grep -Fq "未設定:"'
+mv "$WORK/settings.bak" "$H/${ALT_DIR}/settings.json"
 # 下の比較のため、追記した秘密を初期の状態へ戻す。
 echo "token FAKESECRET_mem1" >"$H/.claude/projects/p1/memory/note.md"
 
@@ -353,16 +355,16 @@ check "ファイルの中身と git の状態が変わらない" '[ "$before" = 
 
 echo "== 設定ディレクトリ・スキルの除外・フックの判定の指定"
 out="$(env -u CLAUDE_REVIEW_CONFIG_DIRS "$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
-check "指定が無ければ ~/.claude だけを見る" '! printf "%s" "$out" | grep -Fq ".claude2" && printf "%s" "$out" | grep -Fq "| ~/.claude/settings.json |"'
+check "指定が無ければ ~/.claude だけを見る" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}" && printf "%s" "$out" | grep -Fq "| ~/.claude/settings.json |"'
 out="$(env -u SECRET_PATROL_HOOK_PATTERN "$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
 check "フックの判定の文字列が無ければ確かめない" 'printf "%s" "$out" | grep "~/.claude/settings.json" | grep -Fq "確かめていない（SECRET_PATROL_HOOK_PATTERN が未設定）"'
 out="$(env -u SECRET_PATROL_SKILL_EXCLUDES "$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
-check "スキルの除外が無ければ名前では除かない" 'printf "%s" "$out" | grep -Fq "~/.claude2/skills/synced/x/SKILL.md"'
+check "スキルの除外が無ければ名前では除かない" 'printf "%s" "$out" | grep -Fq "~/${ALT_DIR}/skills/synced/x/SKILL.md"'
 printf 'CLAUDE_REVIEW_CONFIG_DIRS=%s\nSECRET_PATROL_HOOK_PATTERN=hooks/other.sh\n' "$H/.claude" >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$(env -u CLAUDE_REVIEW_CONFIG_DIRS -u SECRET_PATROL_HOOK_PATTERN "$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
-check "共通の設定ファイルの値を使う" '! printf "%s" "$out" | grep -Fq ".claude2" && printf "%s" "$out" | grep "~/.claude/settings.json" | grep -Fq "なし（未設定）"'
+check "共通の設定ファイルの値を使う" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}" && printf "%s" "$out" | grep "~/.claude/settings.json" | grep -Fq "なし（未設定）"'
 rm -f "$CLAUDE_REVIEW_JOBS_CONF"
-ln -s "$H/.claude2/skills" "$H/.claude/skills"
+ln -s "$H/${ALT_DIR}/skills" "$H/.claude/skills"
 out="$("$SCRIPT_DIR/patrol.sh" --stdout 2>/dev/null)"
 check "リンクで同じ実体を指すスキルの置き場所は1回だけ見る" '[ "$(printf "%s\n" "$out" | grep -c "s1/SKILL.md:2")" = "1" ]'
 rm -f "$H/.claude/skills"

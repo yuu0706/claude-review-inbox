@@ -2,6 +2,8 @@
 # install.sh の検査。一時の HOME を作り、launchctl と brew を偽のコマンドに差し替えて実行する。
 # 本物の HOME・launchctl・brew には触れない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$TESTS_DIR/../.." && pwd -P)"
@@ -86,19 +88,19 @@ export CLAUDE_REVIEW_CLAUDE_PATHS=""
 export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/no-brew-installer"
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# 偽の HOME。~/.claude/skills は ~/.claude2/skills へのリンク（利用者の環境と同じ形）。
+# 偽の HOME。~/.claude/skills は2つ目の設定ディレクトリの skills へのリンクにする（設定ディレクトリを2つ持つ環境と同じ形）。
 export HOME="$WORK/home"
 repo_skills() { local s; for s in "$REPO"/core/skills/*; do [ -d "$s" ] && printf '%s\n' "$s"; done; }
 unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF
 # 2つ目の設定ディレクトリは、共通の設定ファイル（jobs.conf）で指定する。
 mkdir -p "$HOME/.config/claude-review-inbox"
-printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude:~/.claude2\n' >"$HOME/.config/claude-review-inbox/jobs.conf"
-mkdir -p "$HOME/.claude" "$HOME/.claude2/skills/other-skill" "$HOME/.claude2/skills/change-review"
-ln -s ../.claude2/skills "$HOME/.claude/skills"
-echo "old" >"$HOME/.claude2/skills/change-review/SKILL.md"
+printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude:~/%s\n' "$ALT_DIR" >"$HOME/.config/claude-review-inbox/jobs.conf"
+mkdir -p "$HOME/.claude" "$HOME/${ALT_DIR}/skills/other-skill" "$HOME/${ALT_DIR}/skills/change-review"
+ln -s ../${ALT_DIR}/skills "$HOME/.claude/skills"
+echo "old" >"$HOME/${ALT_DIR}/skills/change-review/SKILL.md"
 printf '{"model":"opus","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/other/hook.sh"}]}]}}\n' >"$HOME/.claude/settings.json"
-printf '{"theme":"dark"}\n' >"$HOME/.claude2/settings.json"
-S2="$HOME/.claude2/skills"
+printf '{"theme":"dark"}\n' >"$HOME/${ALT_DIR}/settings.json"
+S2="$HOME/${ALT_DIR}/skills"
 LABEL="com.$(id -un | tr . -).claude-review-inbox"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 HOOKS=("$REPO/core/skills/report-inbox/scripts/unread.sh" "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
@@ -140,9 +142,9 @@ check "HOME が変わらない" '[ "$(tree_sig)" = "$before" ]'
 check "launchctl・brew を呼ばない" '[ ! -s "$CALLS" ]'
 check "試しの通知の操作は表示だけにする" 'printf "%s" "$out" | grep -q "^\[dry-run\] （terminal-notifier があれば）試しの通知"'
 check "行う操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] ln -s $REPO/core/skills/change-review" && printf "%s" "$out" | grep -q "^  - terminal-notifier（聞いてから brew install terminal-notifier）"'
-check "jobs.conf の2つ目の設定ディレクトリにもフックを足す" 'printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude2/settings.json"'
+check "jobs.conf の2つ目の設定ディレクトリにもフックを足す" 'printf "%s" "$out" | grep -Fq "フックを足します: $HOME/${ALT_DIR}/settings.json"'
 out="$(CLAUDE_REVIEW_JOBS_CONF="$WORK/no-jobs.conf" "$REPO/install.sh" --dry-run 2>&1)"
-check "指定が無ければ ~/.claude2 があっても ~/.claude だけを使う" '! printf "%s" "$out" | grep -Fq ".claude2/settings.json" && printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude/settings.json"'
+check "指定が無ければ ~/${ALT_DIR} があっても ~/.claude だけを使う" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}/settings.json" && printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude/settings.json"'
 
 echo "== 本体だけ（--yes）"
 out="$("$REPO/install.sh" --yes 2>&1)"
@@ -173,9 +175,9 @@ check "plist のラベル・サーバー・常駐の設定" '[ "$(plutil -extrac
 check "ログの置き場所を状態の置き場所にする" '[ "$(plutil -extract StandardOutPath raw "$PLIST")" = "$HOME/.local/state/claude-review-inbox/server.log" ]'
 check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
 check "未登録なら bootout しない" '! grep -q "launchctl bootout" "$CALLS"'
-check "両方の settings.json に3つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "3" ] && [ "$(hook_count "$HOME/.claude2/settings.json")" = "3" ] && each_hook_once "$HOME/.claude/settings.json"'
+check "両方の settings.json に3つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "3" ] && [ "$(hook_count "$HOME/${ALT_DIR}/settings.json")" = "3" ] && each_hook_once "$HOME/.claude/settings.json"'
 check "旧版のフック（session-start.sh）は足さない" '[ "$(hook_count "$HOME/.claude/settings.json" "$LEGACY_HOOK")" = "0" ]'
-check "既存の設定を消さない" '[ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/.claude2/settings.json")" = "dark" ]'
+check "既存の設定を消さない" '[ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/${ALT_DIR}/settings.json")" = "dark" ]'
 check "書き換える前に settings.json.bak-<日時> を残す" '[ "$(ls "$HOME/.claude/"settings.json.bak-* | wc -l | tr -d " ")" = "1" ] && grep -q "/other/hook.sh" "$HOME/.claude/"settings.json.bak-* && ! grep -q "unread.sh" "$HOME/.claude/"settings.json.bak-*'
 check "案と状態の置き場所を作る" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
 check "最後に URL と通知の許可の案内を出す" 'printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/" && printf "%s" "$out" | grep -q "5. 通知の許可"'
@@ -194,7 +196,7 @@ echo "== 旧版の後始末（review-loop のリンクと session-start.sh の�
 mkdir -p "$S2/memory-audit"
 echo "old" >"$S2/memory-audit/SKILL.md"
 ln -s "$REPO/core/skills/review-loop" "$S2/review-loop"
-jq --arg c "$LEGACY_HOOK" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
+jq --arg c "$LEGACY_HOOK" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/${ALT_DIR}/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/${ALT_DIR}/settings.json"
 : >"$CALLS"
 out="$("$REPO/install.sh" 2>&1)"
 rc=$?
@@ -202,8 +204,8 @@ check "終了コード0" '[ "$rc" -eq 0 ]'
 check "旧版の review-loop のリンクを外す" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ] && printf "%s" "$out" | grep -Fq "旧版の review-loop のリンクを消しました: $S2/review-loop"'
 check "外した review-loop は .trash へ移さない" '[ -z "$(ls -d "$S2/.trash/"*-review-loop 2>/dev/null)" ]'
 check "既存の実体（memory-audit）は退避してリンクにする" '[ -f "$(ls -d "$S2/.trash/"*-memory-audit)/SKILL.md" ] && [ -L "$S2/memory-audit" ]'
-check "旧版のフックを外し、3つのフックを足す" '[ "$(hook_count "$HOME/.claude2/settings.json" "$LEGACY_HOOK")" = "0" ] && each_hook_once "$HOME/.claude2/settings.json"'
-check "他のフックと設定は残る" '[ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/.claude2/settings.json")" = "dark" ]'
+check "旧版のフックを外し、3つのフックを足す" '[ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$LEGACY_HOOK")" = "0" ] && each_hook_once "$HOME/${ALT_DIR}/settings.json"'
+check "他のフックと設定は残る" '[ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/${ALT_DIR}/settings.json")" = "dark" ]'
 sig2="$(tree_sig)"
 "$REPO/install.sh" >/dev/null 2>&1
 check "後始末の後も2回目で変わらない" '[ "$(tree_sig)" = "$sig2" ]'
@@ -211,12 +213,12 @@ check "後始末の後も2回目で変わらない" '[ "$(tree_sig)" = "$sig2" ]
 echo "== スキル置き場を経由して登録済みのフックは二重に足さない"
 "$REPO/install.sh" --uninstall >/dev/null 2>&1
 "$REPO/install.sh" >/dev/null 2>&1
-jq --arg c "$REPO/core/skills/report-inbox/scripts/unread.sh" 'del(.hooks.SessionStart[] | select(.hooks[]?.command == $c))' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
-jq --arg c "$S2/report-inbox/scripts/unread.sh" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/.claude2/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/.claude2/settings.json"
+jq --arg c "$REPO/core/skills/report-inbox/scripts/unread.sh" 'del(.hooks.SessionStart[] | select(.hooks[]?.command == $c))' "$HOME/${ALT_DIR}/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/${ALT_DIR}/settings.json"
+jq --arg c "$S2/report-inbox/scripts/unread.sh" '.hooks.SessionStart += [{"hooks": [{"type": "command", "command": $c}]}]' "$HOME/${ALT_DIR}/settings.json" >"$WORK/s.json" && mv "$WORK/s.json" "$HOME/${ALT_DIR}/settings.json"
 "$REPO/install.sh" >/dev/null 2>&1
-check "リンクの先が同じなら足さない" '[ "$(hook_count "$HOME/.claude2/settings.json" "$REPO/core/skills/report-inbox/scripts/unread.sh")" = "0" ] && [ "$(hook_count "$HOME/.claude2/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "1" ]'
+check "リンクの先が同じなら足さない" '[ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$REPO/core/skills/report-inbox/scripts/unread.sh")" = "0" ] && [ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "1" ]'
 "$REPO/install.sh" --uninstall >/dev/null 2>&1
-check "--uninstall はスキル置き場を経由したフックも外す" '[ "$(hook_count "$HOME/.claude2/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "0" ]'
+check "--uninstall はスキル置き場を経由したフックも外す" '[ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$S2/report-inbox/scripts/unread.sh")" = "0" ]'
 
 
 echo "== --uninstall"

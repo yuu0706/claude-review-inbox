@@ -16,7 +16,8 @@ description: 定期実行のジョブ（repo-patrol・feedback-mining・memory-a
 | `feedback-mining` | 月曜 11:00 | Skill `feedback-mining` |
 | `secret-patrol` | 会話の開始時（7日ごと。SessionStart の hook） | Skill `secret-patrol` |
 
-`skill-audit`（月曜 10:00）は結果を `${SKILL_AUDIT_STATE:-~/.local/state/skill-audit}/history.md` に書く。報告はしない決まりのため結果は扱わないが、失敗は他のジョブと同じく知らせる。
+`skill-audit`（月曜 10:00）は精査の記録を `${SKILL_AUDIT_STATE:-~/.local/state/skill-audit}/history.md` に書く。精査は報告しない決まりのため記録は扱わないが、失敗は他のジョブと同じく知らせる。
+公開版の点検で当たりなどがあった場合だけ、`skill-audit` は結果を `~/claude-reports/skill-audit/<YYYY-MM-DD>.md` に書く。読み方は Skill `skill-audit` の「2.8 公開版の点検」に従う。
 週1回の3つのジョブ（`memory-audit`・`feedback-mining`・`skill-audit`）は、`install.sh` で登録したときだけ動く。
 
 ## 1. 未読の知らせ

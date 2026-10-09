@@ -1,6 +1,8 @@
 #!/bin/bash
 # skill-audit scripts の検査。一時ディレクトリに偽の ROOT を作って実行する。実際の claude は起動しない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/skill-audit-test.XXXXXX")"
@@ -8,7 +10,7 @@ WORK="$(cd -P "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 # 本物の HOME の下のスキル・案の置き場所・状態を探さないよう、HOME を一時ディレクトリにする。
 export HOME="$WORK/home"
-mkdir -p "$HOME/.claude" "$HOME/.claude2"
+mkdir -p "$HOME/.claude" "$HOME/${ALT_DIR}"
 
 export SKILL_AUDIT_ROOT="$WORK/root"
 export SKILL_AUDIT_STATE="$WORK/state"
@@ -17,7 +19,7 @@ unset XDG_CONFIG_HOME CLAUDE_REVIEW_DENY_READ SKILL_AUDIT_OWN_LINK_ROOTS
 # 起動するコマンドは常に偽物にする（本物の claude を起動しない）。共通の設定ファイルは一時の場所を指す。
 export CLAUDE_LAUNCHER=true
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
-export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/.claude2"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
 # 承認待ちの置き場所と台帳は一時ディレクトリにする。案を作るスクリプトはリポジトリの core のものを使う。
 export CLAUDE_REVIEW_PROPOSALS="$WORK/proposals"
 export CLAUDE_REVIEW_STATE="$WORK/review-state"
@@ -89,14 +91,14 @@ rc=$?
 check "初回は終了コード0" '[ "$rc" -eq 0 ]'
 has() { printf '%s' "$out" | grep -Fq -- "$1"; }
 for rule in "Edit(/$R/**)" "Bash($SCRIPT_DIR/snapshot.sh:*)" "Bash($SCRIPT_DIR/trash-skill.sh:*)" \
-  "Read(/$R/**)" "Read(/$HOME/.claude/**)" "Read(/$HOME/.claude2/**)" "'Skill'" \
+  "Read(/$R/**)" "Read(/$HOME/.claude/**)" "Read(/$HOME/${ALT_DIR}/**)" "'Skill'" \
   "Read(/$HOME/.config/claude-skills/skill-audit.local.md)" \
   "利用者の環境だけの決まりは $HOME/.config/claude-skills/skill-audit.local.md にある（無ければ飛ばす）。" \
   "Read(/$HOME/Library/CloudStorage/**)" "Read(/$HOME/sync-a/**)" "&& 'true' '-p'" \
   "Edit(/$R/synced/**)" "Edit(/$R/plugins/**)" "Edit(/$R/vendored/**)" \
   "Edit(/$R/.trash/**)" "Edit(/$R/linked/**)" "Edit(/$WORK/external/linked/**)" \
-  "Edit(/$HOME/.agents/**)" "Edit(/$HOME/Documents/**)" "Edit(/$HOME/.claude2/CLAUDE.md)" \
-  "Edit(/$HOME/.claude/CLAUDE.md)" "Edit(/$HOME/.claude2/settings.json)" "Edit(/$HOME/.claude/settings.json)" \
+  "Edit(/$HOME/.agents/**)" "Edit(/$HOME/Documents/**)" "Edit(/$HOME/${ALT_DIR}/CLAUDE.md)" \
+  "Edit(/$HOME/.claude/CLAUDE.md)" "Edit(/$HOME/${ALT_DIR}/settings.json)" "Edit(/$HOME/.claude/settings.json)" \
   "--disallowedTools" "'--model' 'opus' '--effort' 'low'" "cd '$R' &&" \
   "否認リストは $PDIR/rejections.md にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は行わない。" \
   "Read(/$PDIR/**)" "Edit(/$PDIR/**)" "Edit(/$CLAUDE_REVIEW_STATE/**)" \
@@ -105,7 +107,7 @@ for rule in "Edit(/$R/**)" "Bash($SCRIPT_DIR/snapshot.sh:*)" "Bash($SCRIPT_DIR/t
 done
 # snapshot.sh と trash-skill.sh は、実体・スキル置き場を経由したパス（両アカウント）・作業のフォルダからの相対パスの各形を許可する。
 for sc in snapshot.sh trash-skill.sh; do
-  for sp in "$SCRIPT_DIR/$sc" "$R/skill-audit/scripts/$sc" "$HOME/.claude2/skills/skill-audit/scripts/$sc" \
+  for sp in "$SCRIPT_DIR/$sc" "$R/skill-audit/scripts/$sc" "$HOME/${ALT_DIR}/skills/skill-audit/scripts/$sc" \
     "$HOME/.claude/skills/skill-audit/scripts/$sc" "skill-audit/scripts/$sc" "./skill-audit/scripts/$sc"; do
     check "dry-run の出力に含む: Bash($sp:*)" 'has "'"'"'Bash($sp:*)'"'"'"'
   done
@@ -279,7 +281,7 @@ check "{job} をジョブ名に置き換え、語ごとに渡す" 'printf "%s" "
 printf 'CLAUDE_LAUNCHER=~/bin/launcher {job}\nCLAUDE_REVIEW_CONFIG_DIRS=~/.claude\n' >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$(env -u CLAUDE_LAUNCHER -u CLAUDE_REVIEW_CONFIG_DIRS "$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
 check "設定ファイルの起動コマンドを使い、~ を展開する" 'printf "%s" "$out" | grep -Fq "&& '"'"'$HOME/bin/launcher'"'"' '"'"'skill-audit'"'"' '"'"'-p'"'"'"'
-check "設定ファイルの設定ディレクトリだけを使う" '! printf "%s" "$out" | grep -Fq ".claude2"'
+check "設定ファイルの設定ディレクトリだけを使う" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}"'
 out="$(CLAUDE_LAUNCHER=/opt/env-launcher "$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
 check "環境変数が設定ファイルより優先する" 'printf "%s" "$out" | grep -Fq "&& '"'"'/opt/env-launcher'"'"' '"'"'-p'"'"'"'
 rm -f "$CLAUDE_REVIEW_JOBS_CONF"
@@ -317,6 +319,84 @@ echo "== 実行権限"
 for f in lib.sh snapshot.sh trash-skill.sh run-audit.sh test.sh; do
   check "実行権限: $f" '[ -x "$SCRIPT_DIR/$f" ]'
 done
+
+echo "== check-public.sh（公開版の点検。検査器はスタブ）"
+CP="$SCRIPT_DIR/check-public.sh"
+STUB="$WORK/public-check"
+PUB_A="$WORK/public-a"
+PUB_B="$WORK/public-b"
+mkdir -p "$STUB" "$PUB_A" "$PUB_B"
+# スタブの check.sh。対象のディレクトリにある rc ファイルの値を終了コードにし、引数を記録する。
+cat >"$STUB/check.sh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"${0%/*}/args.log"
+rc="$(cat "$1/rc" 2>/dev/null || echo 0)"
+[ "$rc" = "1" ] && printf 'core/a.md:3:sample-term\n'
+[ "$rc" = "2" ] && printf 'ERROR: 一覧が空です\n' >&2
+exit "$rc"
+EOF
+chmod +x "$STUB/check.sh"
+export PUBLIC_CHECK_DIR="$STUB"
+export CLAUDE_REPORTS_ROOT="$WORK/reports"
+export SKILL_AUDIT_PUBLIC_DIRS="$WORK/public-dirs.txt"
+RD="$CLAUDE_REPORTS_ROOT/skill-audit"
+
+bash "$CP" >/dev/null 2>&1
+rc=$?
+check "一覧が無ければ何もしない（終了コード0・結果なし）" '[ "$rc" -eq 0 ] && [ ! -e "$RD" ] && [ ! -e "$STUB/args.log" ]'
+
+printf '# 公開版\n\n%s\n%s/\n' "$PUB_A" "$PUB_B" >"$SKILL_AUDIT_PUBLIC_DIRS"
+out="$(bash "$CP" 2>&1)"
+rc=$?
+check "当たりが無ければ終了コード0で結果を書かない" '[ "$rc" -eq 0 ] && [ ! -e "$RD" ] && printf "%s" "$out" | grep -q "当たりはありませんでした（2件）"'
+check "各ディレクトリを収集込み（--no-collect なし）で調べる" '[ "$(cat "$STUB/args.log")" = "$PUB_A${NL}$PUB_B" ]'
+
+echo 1 >"$PUB_B/rc"
+out="$(bash "$CP" 2>&1)"
+rc=$?
+rep="$(ls -1 "$RD/"*.md 2>/dev/null | head -1)"
+check "当たりがあれば終了コード1で結果を書く" '[ "$rc" -eq 1 ] && [ -f "$rep" ]'
+check "結果のファイル名は日付の形" 'case "${rep##*/}" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md) true ;; *) false ;; esac'
+check "結果に公開版の点検の節と当たった行を書く" 'grep -qx "## 公開版の点検" "$rep" && grep -Fq "\`$PUB_B\`: 業務の語が当たった（1行）" "$rep" && grep -Fqx "core/a.md:3:sample-term" "$rep" && ! grep -Fq "\`$PUB_A\`" "$rep"'
+check "公開版のファイルは直さない" '[ "$(ls -A "$PUB_B")" = "rc" ]'
+
+echo 2 >"$PUB_B/rc"
+bash "$CP" >/dev/null 2>&1
+rc=$?
+rep2="$(ls -1t "$RD/"*.md | head -1)"
+check "検査器の失敗（終了コード2）も結果に書き、同じ日は連番で別のファイルにする" '[ "$rc" -eq 1 ] && [ "$rep2" != "$rep" ] && grep -Fq "検査器が失敗した（終了コード 2）" "$rep2" && grep -Fq "一覧が空です" "$rep2"'
+
+rm -rf "$RD"
+printf '%s\n' "$WORK/no-such-public" >"$SKILL_AUDIT_PUBLIC_DIRS"
+bash "$CP" >/dev/null 2>&1
+check "一覧のディレクトリが無ければ結果に書く" 'grep -Fq "\`$WORK/no-such-public\`: ディレクトリが存在しない" "$RD/"*.md'
+
+rm -rf "$RD"
+printf '%s\n' "$PUB_A" >"$SKILL_AUDIT_PUBLIC_DIRS"
+PUBLIC_CHECK_DIR="$WORK/no-such-checker" bash "$CP" >/dev/null 2>&1
+rc=$?
+check "検査器が無ければ、その旨を結果に書く" '[ "$rc" -eq 1 ] && grep -Fq "共通の検査器が見つからないため、点検をしていない" "$RD/"*.md'
+
+rm -rf "$RD" "$STUB/args.log"
+PUBLIC_CHECK_DIR= XDG_CONFIG_HOME="$WORK/xdg-empty" bash "$CP" >/dev/null 2>&1
+rc=$?
+check "検査器の場所が設定されていなければ、その旨を結果に書き点検を飛ばす" '[ "$rc" -eq 1 ] && grep -Fq "検査器の場所が設定されていない" "$RD/"*.md && [ ! -e "$STUB/args.log" ]'
+rm -rf "$RD"
+mkdir -p "$WORK/xdg/claude-skills"
+printf '%s\n' "$STUB" >"$WORK/xdg/claude-skills/public-check-dir"
+PUBLIC_CHECK_DIR= XDG_CONFIG_HOME="$WORK/xdg" bash "$CP" >/dev/null 2>&1
+rc=$?
+check "public-check-dir の1行目から検査器の場所を読む" '[ "$rc" -eq 0 ] && [ "$(cat "$STUB/args.log")" = "$PUB_A" ]'
+
+echo "== run-audit.sh から check-public.sh を呼ぶ"
+rm -rf "$RD"
+PUBLIC_CHECK_DIR="$WORK/no-such-checker" "$SCRIPT_DIR/run-audit.sh"
+rc=$?
+check "検査器が無くても精査は止めず、結果を書く" '[ "$rc" -eq 0 ] && grep -Fq "共通の検査器が見つからないため" "$RD/"*.md'
+rm -rf "$RD"
+"$SCRIPT_DIR/run-audit.sh" --dry-run >/dev/null
+check "dry-run では点検しない" '[ ! -e "$RD" ]'
+unset PUBLIC_CHECK_DIR CLAUDE_REPORTS_ROOT SKILL_AUDIT_PUBLIC_DIRS
 
 echo
 printf 'RESULT: pass=%d fail=%d\n' "$pass" "$fail"

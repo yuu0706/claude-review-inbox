@@ -2,6 +2,8 @@
 # install.sh の定期実行（週1回の見直しの3つ）と見回りの範囲（patrol.conf）の検査。
 # 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl・brew・terminal-notifier には触れない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$TESTS_DIR/../.." && pwd -P)"
@@ -48,10 +50,10 @@ export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
 export HOME="$WORK/home"
 unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME
-mkdir -p "$HOME/.claude" "$HOME/.claude2/skills"
-ln -s ../.claude2/skills "$HOME/.claude/skills"
+mkdir -p "$HOME/.claude" "$HOME/${ALT_DIR}/skills"
+ln -s ../${ALT_DIR}/skills "$HOME/.claude/skills"
 printf '{}\n' >"$HOME/.claude/settings.json"
-S2="$HOME/.claude2/skills"
+S2="$HOME/${ALT_DIR}/skills"
 AG="$HOME/Library/LaunchAgents"
 U="com.$(id -un | tr . -)"
 JOBS="$HOME/.local/state/claude-review-inbox/scheduled-jobs.tsv"

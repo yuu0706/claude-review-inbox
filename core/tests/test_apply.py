@@ -20,6 +20,8 @@ import urllib.parse
 HERE = os.path.dirname(os.path.realpath(__file__))
 CORE = os.path.dirname(HERE)
 SERVER = os.path.join(CORE, "server", "inbox_server.py")
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を定数で持つ。
+ALT_DIR = ".claude_alt"
 sys.path.insert(0, os.path.join(CORE, "skills", "change-review", "scripts"))
 import proposal_lib as pl  # noqa: E402
 import approved as approved_mod  # noqa: E402
@@ -311,7 +313,7 @@ class ApplyLibTest(Base):
         self.assert_needs_claude(self.add([rej], udiff("x\n", "y\n", rej)), rej, "x\n", "台帳")
 
     def test_link_inside_home_is_allowed(self):
-        real = os.path.join(self.home, ".claude2", "CLAUDE.md")
+        real = os.path.join(self.home, ALT_DIR, "CLAUDE.md")
         link = os.path.join(self.home, ".claude", "CLAUDE.md")
         write(real, "規則\n")
         os.makedirs(os.path.dirname(link))

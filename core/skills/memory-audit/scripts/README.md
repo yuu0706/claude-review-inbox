@@ -56,7 +56,7 @@ $CONFIG_DIR/projects/*/memory
 
 起動の前に、対象の全ディレクトリを `REPORTS_ROOT/memory-audit/.snapshots/<YYYY-MM-DD-HHMMSS>/` へ `cp -Rp` で複製する。元の絶対パスを複製先の下に保つ（例: `.snapshots/<日時><HOME>/.claude/projects/<プロジェクト>/memory`）。1件でも複製が失敗したら claude を起動せず、終了コード1で終わる。
 
-あわせて、作業用のフォルダ `REPORTS_ROOT/memory-audit/.staging/<YYYY-MM-DD-HHMMSS>/` を作る。日時は複製と同じである。claude は直した版を、元の絶対パスの構造を保ってここへ書く。ただし、元の絶対パスの各要素のうち `.claude` で始まるもの（`.claude`・`.claude2` 等）は、先頭のドットを外した名前（`claude`・`claude2`）に置き換えて写す。
+あわせて、作業用のフォルダ `REPORTS_ROOT/memory-audit/.staging/<YYYY-MM-DD-HHMMSS>/` を作る。日時は複製と同じである。claude は直した版を、元の絶対パスの構造を保ってここへ書く。ただし、元の絶対パスの各要素のうち `.claude` で始まるもの（`.claude`・`.claude-work` 等）は、先頭のドットを外した名前（`claude`・`claude-work`）に置き換えて写す。
 
 | 元の位置 | 作業用での位置 |
 | --- | --- |

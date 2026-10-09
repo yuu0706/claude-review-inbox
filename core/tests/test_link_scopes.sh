@@ -2,6 +2,8 @@
 # スキルの置き場所の直下にあるリンクの先の実体を、3つの定期実行のスクリプトが許可・拒否の規則に足すことの検査。
 # HOME を一時ディレクトリに差し替え、--dry-run の出力だけを見る。本物の claude は起動しない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$TESTS_DIR/../.." && pwd -P)"
@@ -17,8 +19,8 @@ export CHANGE_REVIEW_SCRIPTS="$REPO/core/skills/change-review/scripts"
 export SKILL_AUDIT_OWN_LINK_ROOTS="$WORK/own"
 # 設定ディレクトリを2つ持ち、スキルの実体を2つ目に置く形にする。起動するコマンドは偽の HOME の ~/.local/bin/claude になる。
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
-export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/.claude2"
-export SKILL_AUDIT_ROOT="$HOME/.claude2/skills"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
+export SKILL_AUDIT_ROOT="$HOME/${ALT_DIR}/skills"
 export SKILL_AUDIT_EXCLUDE="synced"
 
 pass=0
@@ -29,14 +31,14 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 # 出力の中で、単一引用符で囲んだ引数がちょうど何回現れるかを数える。
 count_arg() { printf '%s\n' "$1" | tr ' ' '\n' | grep -Fxc -- "'$2'"; }
 
-# 偽の HOME。~/.claude/skills と ~/.claude/CLAUDE.md は ~/.claude2 へのリンクにする（本物と同じ形）。
-SK="$HOME/.claude2/skills"
+# 偽の HOME。~/.claude/skills と ~/.claude/CLAUDE.md は2つ目の設定ディレクトリへのリンクにする（設定ディレクトリを2つ持つ環境と同じ形）。
+SK="$HOME/${ALT_DIR}/skills"
 mkdir -p "$SK/alpha" "$SK/synced/x" "$WORK/own/ownskill" "$WORK/ext/extskill" "$HOME/.local/bin" \
-  "$HOME/.claude2/projects/p1/memory"
+  "$HOME/${ALT_DIR}/projects/p1/memory"
 mkdir -p "$HOME/.claude"
-ln -s ../.claude2/skills "$HOME/.claude/skills"
-printf '# rules\n' >"$HOME/.claude2/CLAUDE.md"
-ln -s ../.claude2/CLAUDE.md "$HOME/.claude/CLAUDE.md"
+ln -s ../${ALT_DIR}/skills "$HOME/.claude/skills"
+printf '# rules\n' >"$HOME/${ALT_DIR}/CLAUDE.md"
+ln -s ../${ALT_DIR}/CLAUDE.md "$HOME/.claude/CLAUDE.md"
 printf '# alpha\n' >"$SK/alpha/SKILL.md"
 printf '# own\n' >"$WORK/own/ownskill/SKILL.md"
 printf '# ext\n' >"$WORK/ext/extskill/SKILL.md"
@@ -45,12 +47,12 @@ ln -s "$WORK/ext/extskill" "$SK/extskill"
 ln -s "$WORK/ext/extskill" "$SK/extskill2"
 ln -s "$WORK/nosuch" "$SK/broken"
 ln -s "$REPO/core/skills/change-review" "$SK/change-review"
-printf 'm1\n' >"$HOME/.claude2/projects/p1/memory/a.md"
-printf '{"type":"user"}\n' >"$HOME/.claude2/projects/p1/s.jsonl"
+printf 'm1\n' >"$HOME/${ALT_DIR}/projects/p1/memory/a.md"
+printf '{"type":"user"}\n' >"$HOME/${ALT_DIR}/projects/p1/s.jsonl"
 CR_REAL="$REPO/core/skills/change-review"
 OWN="$WORK/own/ownskill"
 EXT="$WORK/ext/extskill"
-CMD_REAL="$HOME/.claude2/CLAUDE.md"
+CMD_REAL="$HOME/${ALT_DIR}/CLAUDE.md"
 
 echo "== 共通の処理（link-scopes.sh）"
 . "$CHANGE_REVIEW_SCRIPTS/link-scopes.sh"

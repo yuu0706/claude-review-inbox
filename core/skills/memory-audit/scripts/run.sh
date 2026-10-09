@@ -115,7 +115,7 @@ snap="$REPORT_DIR/.snapshots/$ts"
 stage="$REPORT_DIR/.staging/$ts"
 report="$(next_report_path "$REPORT_DIR")"
 
-# 作業用のフォルダの中での位置を求める。元の絶対パスの各要素のうち .claude で始まるもの（.claude・.claude2 等）は、
+# 作業用のフォルダの中での位置を求める。元の絶対パスの各要素のうち .claude で始まるもの（.claude・.claude-work 等）は、
 # 先頭のドットを外して写す。claude -p はパスに .claude の要素を含む場所への Write を拒否するためである。
 # 例: <HOME>/.claude/projects/X/memory -> <HOME>/claude/projects/X/memory
 stage_rel() {

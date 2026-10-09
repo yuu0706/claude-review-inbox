@@ -1,6 +1,8 @@
 #!/bin/bash
 # feedback-mining scripts の検査。一時ディレクトリに偽の会話の履歴を作って実行する。実際の claude は起動しない。
 set -u
+# 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
+ALT_DIR=.claude_alt
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/feedback-mining-test.XXXXXX")"
@@ -8,7 +10,7 @@ WORK="$(cd -P "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 # 本物の HOME の下のスキル・案の置き場所・状態を探さないよう、HOME を一時ディレクトリにする。
 export HOME="$WORK/home"
-mkdir -p "$HOME/.claude" "$HOME/.claude2"
+mkdir -p "$HOME/.claude" "$HOME/${ALT_DIR}"
 
 export CLAUDE_REPORTS_ROOT="$WORK/reports"
 export CLAUDE_REPORTS_STATE="$WORK/state"
@@ -17,7 +19,7 @@ unset CLAUDE_REVIEW_PROPOSALS CLAUDE_REVIEW_STATE SKILL_AUDIT_STATE XDG_CONFIG_H
 # 起動するコマンドは常に偽物にする（本物の claude を起動しない）。共通の設定ファイルは一時の場所を指す。
 export CLAUDE_LAUNCHER="$WORK/fake-claude"
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
-export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/.claude2"
+export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
 PDIR="$CLAUDE_REPORTS_ROOT/proposals"
 LEDGER="$HOME/.local/state/claude-review-inbox"
 STATE="$CLAUDE_REPORTS_STATE/feedback-mining"
@@ -84,10 +86,10 @@ for rule in "'$FAKE' '-p'" \
   "否認リストは $PDIR/rejections.md にある。決まりの案を作る前に読み、否認リストと同じ対象・同じ趣旨の案は作らない。" \
   "'--model' 'opus' '--effort' 'low'" "'--allowedTools' 'Skill' 'Read(/$HOME/.claude/**)'" \
   "'Read(/$PDIR/**)' 'Read(/$HOME/.config/claude-skills/feedback-mining.local.md)' 'Read(/$HOME/.local/state/skill-audit/history.md)' 'Edit(/$RDIR/**)' '--disallowedTools'" \
-  "'Read(/$HOME/.claude/**)' 'Read(/$HOME/.claude2/**)'" \
+  "'Read(/$HOME/.claude/**)' 'Read(/$HOME/${ALT_DIR}/**)'" \
   "'Read(/$HOME/.config/claude-skills/feedback-mining.local.md)'" \
   "利用者の環境だけの決まりは $HOME/.config/claude-skills/feedback-mining.local.md にある（無ければ飛ばす）。" \
-  "'Read(/$HOME/Library/CloudStorage/**)' 'Edit(/$HOME/.claude/**)' 'Edit(/$HOME/.claude2/**)' 'Edit(/$HOME/Documents/**)' 'Edit(/$HOME/.agents/**)'" \
+  "'Read(/$HOME/Library/CloudStorage/**)' 'Edit(/$HOME/.claude/**)' 'Edit(/$HOME/${ALT_DIR}/**)' 'Edit(/$HOME/Documents/**)' 'Edit(/$HOME/.agents/**)'" \
   "'Edit(/$PDIR/**)' 'Edit(/$LEDGER/**)'" \
   "cd '$RDIR' &&"; do
   check "dry-run の出力に含む: $rule" 'has "$rule"'
@@ -166,7 +168,7 @@ check "{job} をジョブ名に置き換え、語ごとに渡す" 'printf "%s" "
 printf 'CLAUDE_LAUNCHER=~/bin/launcher {job}\nCLAUDE_REVIEW_CONFIG_DIRS=~/.claude\nCLAUDE_REVIEW_DENY_READ=~/sync-a\n' >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$(env -u CLAUDE_LAUNCHER -u CLAUDE_REVIEW_CONFIG_DIRS "$SCRIPT_DIR/run.sh" --dry-run)"
 check "設定ファイルの起動コマンドを使い、~ を展開する" 'printf "%s" "$out" | grep -Fq "&& '"'"'$HOME/bin/launcher'"'"' '"'"'feedback-mining'"'"' '"'"'-p'"'"'"'
-check "設定ファイルの設定ディレクトリだけを使う" '! printf "%s" "$out" | grep -Fq ".claude2"'
+check "設定ファイルの設定ディレクトリだけを使う" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}"'
 check "設定ファイルの読み取りの拒否を足す" 'printf "%s" "$out" | grep -Fq "'"'"'Read(/$HOME/sync-a/**)'"'"'"'
 out="$(CLAUDE_LAUNCHER=/opt/env-launcher "$SCRIPT_DIR/run.sh" --dry-run)"
 check "環境変数が設定ファイルより優先する" 'printf "%s" "$out" | grep -Fq "&& '"'"'/opt/env-launcher'"'"' '"'"'-p'"'"'"'

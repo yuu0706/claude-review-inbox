@@ -10,6 +10,7 @@ Skill `skill-audit` を週1回、非対話で起動するためのスクリプ�
 | `snapshot.sh <スキル名> <相対パス>` | 修正前のファイルを `STATE_DIR/history/<YYYY-MM-DD>/<スキル名>__<相対パス>.bak` へ退避する。同日の2回目以降は上書きしない |
 | `trash-skill.sh <スキル名>` | スキルのディレクトリを `ROOT/.skill-audit-trash/<YYYY-MM-DD-HHMMSS>-<スキル名>/` へ移動する。削除はしない |
 | `run-audit.sh [--force] [--dry-run]` | 変更を検出し、権限を絞った `claude` で精査を起動する。実行の前後を比べ、追加は残し、修正・削除は戻して承認待ちにする |
+| `check-public.sh` | 公開版のディレクトリの一覧（`public-dirs.txt`）の各ディレクトリを共通の検査器の `check.sh` で調べ、当たり・失敗・検査器が無いことを `~/claude-reports/skill-audit/<YYYY-MM-DD>.md` に書く。`run-audit.sh` が `--dry-run` 以外で毎回呼ぶ。公開版は直さない |
 | `test.sh` | 一時ディレクトリに偽の ROOT を作って上記を検査する。実際の claude は起動しない |
 
 ## 環境変数
