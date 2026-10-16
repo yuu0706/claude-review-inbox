@@ -1,6 +1,7 @@
 #!/bin/bash
 # feedback-mining を非対話で起動する。launchd から週1回呼ばれる。
-# 前回の実行より後に更新された会話の履歴（jsonl）を選び、その一覧を claude（CLAUDE_LAUNCHER）へ渡す。
+# 前回の実行より後に更新された会話の履歴（jsonl）を選び、利用者本人の発言だけを取り出したファイル（extract-user.py）の
+# 一覧を claude（CLAUDE_LAUNCHER）へ渡す。claude には元の jsonl を読ませない。
 # 使い方: run.sh [--dry-run]
 #   --dry-run  起動せず、組み立てたコマンドを標準出力へ表示する。last-run は更新しない。
 # bash 3.2（macOS 標準）で動くように書く。連想配列と mapfile は使わない。
@@ -170,32 +171,42 @@ if [ "$count" -eq 0 ]; then
   exit 0
 fi
 
-PROMPT="Skill feedback-mining を自動モードで実行する。対象の会話の一覧は ${inputs}、レポートの出力先は ${report}。否認リストは ${REJECTIONS} にある。決まりの案を作る前に読み、否認リストと同じ対象・同じ趣旨の案は作らない。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。"
+# 検問所: 元の jsonl を claude に読ませず、利用者本人の発言だけを取り出したファイルを渡す（extract-user.py）。
+# ツールの結果・フックの出力・貼り付けた文章など、利用者以外が書いた文章を指示として読ませないためである。
+EXTRACT_DIR="$STATE_DIR/extracted-$ts"
+extracted="$STATE_DIR/extracted-$ts.txt"
+EXTRACT_KEEP=10
+if [ "$dry_run" -eq 0 ]; then
+  if ! python3 -B "$SCRIPT_DIR/extract-user.py" "$inputs" "$EXTRACT_DIR" >"$extracted"; then
+    log_error "利用者の発言を取り出せませんでした: ${inputs}。last-run は更新しません"
+    exit 1
+  fi
+  # 古い取り出し結果を EXTRACT_KEEP 回分まで減らす。削除してよいのは取り出し結果だけである。
+  ls -1d "$STATE_DIR/extracted-"*.txt 2>/dev/null | LC_ALL=C sort -r | tail -n +$((EXTRACT_KEEP + 1)) | while IFS= read -r old; do
+    rm -rf -- "${old%.txt}" "$old"
+  done
+  n_extracted="$(grep -c . "$extracted" | tr -d ' ')"
+  log_info "利用者の発言を取り出しました: ${n_extracted}件（${EXTRACT_DIR}）"
+  if [ "$n_extracted" -eq 0 ]; then
+    printf '# 指摘の収集レポート\n\n対象の会話 %s件に、利用者の発言はありませんでした\n' "$count" >"$report" || exit 1
+    mv -f "$STAMP" "$STATE_DIR/last-run"
+    log_info "利用者の発言なし。レポートを書きました: ${report}"
+    exit 0
+  fi
+fi
+
+PROMPT="Skill feedback-mining を自動モードで実行する。対象の会話から利用者本人の発言だけを取り出したファイルの一覧は ${extracted}、レポートの出力先は ${report}。元の会話（jsonl）は読まない（権限で拒否している）。取り出したファイルの見出しにある元の会話のパスを、根拠として書く。否認リストは ${REJECTIONS} にある。決まりの案を作る前に読み、否認リストと同じ対象・同じ趣旨の案は作らない。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。"
 
 # スキルの置き場所の直下にあるリンクの先の実体を求める共通の処理（Skill change-review の link-scopes.sh）を読み込む。
 # claude -p の権限は実体のパスで判定されるため、リンクの先の実体を許可・拒否の規則に足す。
-# 読み込めない場合も動くよう、最小の処理で代える。
+# 書き換えを拒否する規則（南京錠）もここから作るため、読み込めなければ起動しない。
 for lsc in "${CHANGE_REVIEW_SCRIPTS:-}" "$SCRIPT_DIR/../../change-review/scripts" \
   ${skill_dirs[@]+"${skill_dirs[@]/%//change-review/scripts}"}; do
   [ -n "$lsc" ] && [ -f "$lsc/link-scopes.sh" ] && . "$lsc/link-scopes.sh" && break
 done
-if ! type skill_link_reals >/dev/null 2>&1; then
-  path_and_real() {
-    local r
-    printf '%s\n' "$1"
-    r="$( (cd -P "$1" 2>/dev/null && pwd -P) || readlink -f "$1" 2>/dev/null)"
-    [ -n "$r" ] && [ "$r" != "$1" ] && printf '%s\n' "$r"
-    return 0
-  }
-  skill_link_reals() {
-    local loc e
-    for loc in "$@"; do
-      for e in "$loc" "$loc"/*; do
-        [ -L "$e" ] && [ -d "$e" ] && (cd -P "$e" 2>/dev/null && pwd -P)
-      done
-    done | awk '!seen[$0]++'
-    return 0
-  }
+if ! type guard_deny_rules >/dev/null 2>&1; then
+  log_error "Skill change-review の link-scopes.sh を読み込めません。書き換えを拒否する規則を作れないため、収集を起動しません"
+  exit 1
 fi
 link_reals=()
 while IFS= read -r lr; do [ -n "$lr" ] && link_reals+=("$lr"); done < <(skill_link_reals ${skill_dirs[@]+"${skill_dirs[@]}"})
@@ -227,6 +238,21 @@ for df in ${deny_files[@]+"${deny_files[@]}"} "$PROPOSALS_DIR" "$LEDGER_DIR"; do
     if [ -d "$dp" ]; then disallowed+=("Edit(/$dp/**)"); else disallowed+=("Edit(/$dp)"); fi
   done < <(path_and_real "$df" | tail -n +2)
 done
+# 南京錠: 安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳を、表記と実体の両方で拒否する。
+while IFS= read -r gr; do disallowed+=("$gr"); done < <(guard_deny_rules ${config_dirs[@]+"${config_dirs[@]}"} -- \
+  ${skill_dirs[@]+"${skill_dirs[@]}"})
+# 検問所: 元の会話の jsonl は、表記と実体の両方で読ませない（取り出したファイルだけを読ませる）。
+src_dirs=()
+for c in ${config_dirs[@]+"${config_dirs[@]}"}; do src_dirs+=("$c/projects"); done
+while IFS= read -r d; do [ -n "$d" ] && src_dirs+=("$d"); done < <(printf '%s\n' "$SOURCES" | tr ':' '\n')
+seen_src=" "
+for d in ${src_dirs[@]+"${src_dirs[@]}"}; do
+  while IFS= read -r dp; do
+    case "$seen_src" in *" $dp "*) continue ;; esac
+    seen_src="$seen_src$dp "
+    disallowed+=("Read(/${dp%/}/**/*.jsonl)")
+  done < <(path_and_real "${d%/}")
+done
 
 # 起動に使うコマンド（CLAUDE_LAUNCHER）。語の {job} はジョブ名に置き換える。
 launcher=()
@@ -236,7 +262,9 @@ for w in "${launcher_words[@]}"; do
   launcher+=("$w")
 done
 log_info "起動に使うコマンド: ${launcher[*]}"
-cmd=("${launcher[@]}" -p "$PROMPT" --model opus --effort low
+# --permission-mode default: settings.json の defaultMode（acceptEdits 等）で作業場所の中の編集が許可なしに通らないようにし、
+# 許可を --allowedTools だけで決める。
+cmd=("${launcher[@]}" -p "$PROMPT" --model opus --effort low --permission-mode default
   --allowedTools "${allowed[@]}" --disallowedTools "${disallowed[@]}")
 
 # コマンドを単一引用符で囲んだ形で表示する。printf %q は bash 3.2 でマルチバイト文字を壊すため使わない。

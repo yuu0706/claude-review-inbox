@@ -2,8 +2,11 @@
 # memory-audit を非対話で起動する。launchd から週1回呼ばれる。
 # 対象のメモリを複製してから claude（CLAUDE_LAUNCHER）を起動する。claude には直した版を作業用のフォルダ（.staging）へ書かせ、
 # 正常終了した場合だけ、条件を満たすファイルを元のメモリへ書き戻す。最後に複製との差分をレポートの末尾へ足す。
-# 書き戻すのは、既存の行を変えない・消さない変更（diff の - 行が無いもの）だけである。それ以外の修正と、
-# claude が deletions.tsv に挙げた削除の候補は、書き戻さずに Skill change-review の承認待ちの案にする（案はシェルで作る）。
+# 変更（追加・修正）と、claude が deletions.tsv に挙げた削除の候補は、承認が要るかを判定し（approval_reason）、
+# 要らなければ反映する（修正は書き戻し、削除はファイルを消して索引の行も消す）。承認が要るものは、書き戻さずに
+# Skill change-review の承認待ちの案にする（案はシェルで作る）。承認が要るのは、claude が needs-approval.tsv に
+# 挙げたもの、訂正リストで同じ種類が2回訂正されたもの、安全のための規則の記述を消すもの、移し先への書き足しを伴うものである。
+# 承認なしで反映した変更には ID を振り、直す前の版（.snapshots の複製）のパスとともにレポートへ載せる。
 # 修正・削除の案には、claude が候補ごとに作った「消える記述の行き先」の表と、移し先への追加の差分を入れる（Skill change-review「2.2」）。
 # メモリの削除の案には、そのメモリを指す索引（MEMORY.md）の行の削除も入れ、索引だけの案を別に作らない。
 # claude -p では ~/.claude 配下が保護対象のファイルとして扱われ、Edit を許可しても書き込めないため、この方式を採る。
@@ -46,6 +49,9 @@ for c in ${config_dirs[@]+"${config_dirs[@]}"}; do skill_dirs+=("$c/skills"); al
 PROPOSALS_DIR="${CLAUDE_REVIEW_PROPOSALS:-$REPORTS_ROOT/proposals}"
 PROPOSALS_DIR="${PROPOSALS_DIR%/}"
 REJECTIONS="$PROPOSALS_DIR/rejections.md"
+CORRECTIONS="$PROPOSALS_DIR/corrections.md"
+# 差分の - 行がこれに当たる変更は、安全のための規則をゆるめるおそれがあるため、承認待ちに回す。
+SAFETY_RE='permissions\.deny|gitleaks|秘密の検査|security-rules|commit-guard'
 LEDGER_DIR="${CLAUDE_REVIEW_STATE:-$HOME/.local/state/claude-review-inbox}"
 LEDGER_DIR="${LEDGER_DIR%/}"
 
@@ -162,33 +168,26 @@ CR_SCRIPTS="$(find_change_review)" || CR_SCRIPTS=""
 DEST_RULE=""
 [ -n "$CR_SCRIPTS" ] && DEST_RULE="$("$CR_SCRIPTS/destinations.sh" --print-rule "$stage/destinations")"
 
-PROMPT="Skill memory-audit を自動モードで実行する。対象のメモリは ${targets[*]}、直す前の複製は ${snap}、直した版の書き込み先は ${stage}（元の絶対パスの構造を保ち、.claude で始まる要素は先頭のドットを外して写す）、レポートの出力先は ${report}。対象ごとの元の位置と書き込み先での位置は次のとおり: ${mapping}。メモリは直接直さず、書き込み先へ直した版を書く。否認リストは ${REJECTIONS} にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は作らない。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。削除の候補は ${stage}/deletions.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く。削除の候補のメモリを指す索引（MEMORY.md）の行は消さない（シェルが削除の案に含める）。${DEST_RULE}"
+NEEDS="$stage/needs-approval.tsv"
+PROMPT="Skill memory-audit を自動モードで実行する。対象のメモリは ${targets[*]}、直す前の複製は ${snap}、直した版の書き込み先は ${stage}（元の絶対パスの構造を保ち、.claude で始まる要素は先頭のドットを外して写す）、レポートの出力先は ${report}。対象ごとの元の位置と書き込み先での位置は次のとおり: ${mapping}。メモリは直接直さず、書き込み先へ直した版を書く。否認リストは ${REJECTIONS} にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は作らない。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。削除の候補は ${stage}/deletions.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く。削除の候補のメモリを指す索引（MEMORY.md）の行は消さない（シェルが、削除を反映するときに消すか、削除の案に含める）。訂正リストは ${CORRECTIONS} にある。否認リストと同じく始める前に読み、訂正された変更を再び行わない。承認が要らないと判断した修正・削除・統合は、そのまま反映される。承認が要ると判断したもの（SKILL.md「0.1」の承認待ちに回すもの、判断に迷うもの）は、${NEEDS} に「元の絶対パス<TAB>理由」の形で1行1件書く（シェルが承認待ちにする）。${DEST_RULE}"
 
 # スキルの置き場所の直下にあるリンクの先の実体を求める共通の処理（Skill change-review の link-scopes.sh）を読み込む。
 # claude -p の権限は実体のパスで判定されるため、リンクの先の実体を許可・拒否の規則に足す。
-# 読み込めない場合も動くよう、最小の処理で代える。
+# 書き換えを拒否する規則（南京錠）もここから作るため、読み込めなければ起動しない。
 for lsc in "${CHANGE_REVIEW_SCRIPTS:-}" "$SCRIPT_DIR/../../change-review/scripts" \
   ${skill_dirs[@]+"${skill_dirs[@]/%//change-review/scripts}"}; do
   [ -n "$lsc" ] && [ -f "$lsc/link-scopes.sh" ] && . "$lsc/link-scopes.sh" && break
 done
-if ! type skill_link_reals >/dev/null 2>&1; then
-  path_and_real() {
-    local r
-    printf '%s\n' "$1"
-    r="$( (cd -P "$1" 2>/dev/null && pwd -P) || readlink -f "$1" 2>/dev/null)"
-    [ -n "$r" ] && [ "$r" != "$1" ] && printf '%s\n' "$r"
-    return 0
-  }
-  skill_link_reals() {
-    local loc e
-    for loc in "$@"; do
-      for e in "$loc" "$loc"/*; do
-        [ -L "$e" ] && [ -d "$e" ] && (cd -P "$e" 2>/dev/null && pwd -P)
-      done
-    done | awk '!seen[$0]++'
-    return 0
-  }
+# 南京錠（guard_deny_rules）が無いまま起動すると、安全のための規則やフックのスクリプトを書き換えられる。読み込めなければ起動しない。
+if ! type guard_deny_rules >/dev/null 2>&1; then
+  log_error "Skill change-review の link-scopes.sh を読み込めません。書き換えを拒否する規則を作れないため、精査を起動しません"
+  exit 1
 fi
+APPROVAL_MODE="$(approval_mode)"
+LEDGER_SH=""
+for lsc in "${CHANGE_REVIEW_SCRIPTS:-}" "$SCRIPT_DIR/../../change-review/scripts"; do
+  [ -n "$lsc" ] && [ -f "$lsc/ledger.sh" ] && { LEDGER_SH="$lsc/ledger.sh"; break; }
+done
 link_reals=()
 while IFS= read -r lr; do [ -n "$lr" ] && link_reals+=("$lr"); done < <(skill_link_reals ${skill_dirs[@]+"${skill_dirs[@]}"})
 
@@ -222,6 +221,9 @@ for df in ${deny_files[@]+"${deny_files[@]}"} "$PROPOSALS_DIR" "$LEDGER_DIR"; do
     if [ -d "$dp" ]; then disallowed+=("Edit(/$dp/**)"); else disallowed+=("Edit(/$dp)"); fi
   done < <(path_and_real "$df" | tail -n +2)
 done
+# 南京錠: 安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳を、表記と実体の両方で拒否する。
+while IFS= read -r gr; do disallowed+=("$gr"); done < <(guard_deny_rules ${config_dirs[@]+"${config_dirs[@]}"} -- \
+  ${skill_dirs[@]+"${skill_dirs[@]}"})
 
 # 起動に使うコマンド（CLAUDE_LAUNCHER）。語の {job} はジョブ名に置き換える。
 launcher=()
@@ -231,7 +233,9 @@ for w in "${launcher_words[@]}"; do
   launcher+=("$w")
 done
 log_info "起動に使うコマンド: ${launcher[*]}"
-cmd=("${launcher[@]}" -p "$PROMPT" --model opus --effort low
+# --permission-mode default: settings.json の defaultMode（acceptEdits 等）で作業場所の中の編集が許可なしに通らないようにし、
+# 許可を --allowedTools だけで決める。
+cmd=("${launcher[@]}" -p "$PROMPT" --model opus --effort low --permission-mode default
   --allowedTools "${allowed[@]}" --disallowedTools "${disallowed[@]}")
 
 # コマンドを単一引用符で囲んだ形で表示する。printf %q は bash 3.2 でマルチバイト文字を壊すため使わない。
@@ -279,16 +283,85 @@ proposed_out="$(mktemp "${TMPDIR:-/tmp}/memory-audit-proposed.XXXXXX")" || exit 
 one_diff="$(mktemp "${TMPDIR:-/tmp}/memory-audit-one.XXXXXX")" || exit 1
 tmpd="$(mktemp -d "${TMPDIR:-/tmp}/memory-audit-work.XXXXXX")" || exit 1
 trap 'rm -f "$diff_out" "$skip_out" "$added_out" "$proposed_out" "$one_diff"; rm -rf "$tmpd"; rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+# 削除の候補のうち、承認待ちに回すもの・承認なしで反映するもの（元の絶対パス<TAB>理由）。
+del_approval="$tmpd/del-approval.tsv"
+del_auto="$tmpd/del-auto.tsv"
+: >"$del_approval"; : >"$del_auto"
+auto_n=0
 
 # 既存の行を変えない・消さない変更（diff の - 行が無い）なら 0 を返す。
 only_additions() {
   ! diff -u "$1" "$2" | tail -n +3 | grep -q '^-'
 }
 
-# deletions.tsv のうち、指定したメモリのディレクトリの直下にある削除の候補のファイル名を1行1件で出す。
+# 削除を承認待ちに回す候補のうち、指定したメモリのディレクトリの直下にあるもののファイル名を1行1件で出す。
 deleted_names() {
-  [ -f "$stage/deletions.tsv" ] || return 0
-  awk -F'\t' -v d="$1/" 'index($1, d) == 1 && index(substr($1, length(d) + 1), "/") == 0 && $1 ~ /\.md$/ { print substr($1, length(d) + 1) }' "$stage/deletions.tsv"
+  awk -F'\t' -v d="$1/" 'index($1, d) == 1 && index(substr($1, length(d) + 1), "/") == 0 && $1 ~ /\.md$/ { print substr($1, length(d) + 1) }' "$del_approval"
+}
+
+# 訂正リストの「種類」に使う名前（<プロジェクト>/<ファイル名>）。
+memory_name() {
+  local proj="${1%/memory/*}"
+  printf '%s/%s' "${proj##*/}" "${1##*/}"
+}
+
+# 承認が要るかを判定する。要れば理由を標準出力へ書いて 0 を返し、要らなければ 1 を返す。
+# 引数: <元の絶対パス> <追加|修正|削除> <差分のファイル>
+approval_reason() {
+  local target="$1" kind="$2" dfile="$3" ddir n r
+  ddir="$stage/destinations$(stage_rel "$target")"
+  if [ -z "$CR_SCRIPTS" ]; then
+    # 訂正リストを読めず、承認待ちも作れない。追加だけは従来どおり反映する。
+    [ "$kind" = 追加 ] && return 1
+    printf 'Skill change-review が見つからない'
+    return 0
+  fi
+  if [ -f "$NEEDS" ]; then
+    r="$(awk -F'\t' -v t="$target" '$1 == t { print ($2 == "" ? "理由の記載なし" : $2); exit }' "$NEEDS")"
+    if [ -n "$r" ]; then
+      printf '精査が承認が要ると判断した（%s）' "$r"
+      return 0
+    fi
+  fi
+  n="$(bash "$CR_SCRIPTS/corrections.sh" count "memory-audit/${kind}/$(memory_name "$target")" 2>/dev/null)"
+  if [ "${n:-0}" -ge 2 ]; then
+    printf '同じ種類の変更（memory-audit/%s/%s）が訂正リストで %s 回訂正されている' "$kind" "$(memory_name "$target")" "$n"
+    return 0
+  fi
+  if [ -s "$dfile" ] && tail -n +3 "$dfile" | grep '^-' | grep -Eq "$SAFETY_RE"; then
+    printf '安全のための規則（permissions.deny・gitleaks・秘密の検査など）の記述を消す・変える'
+    return 0
+  fi
+  if [ -f "$ddir/moves.tsv" ] || grep -Fq '（候補なし）' "$ddir/table.md" 2>/dev/null; then
+    printf '消える記述を移し先へ書き足す必要がある'
+    return 0
+  fi
+  if [ "$APPROVAL_MODE" = screen ] && [ "$kind" != 追加 ]; then
+    printf '承認ありの設定（CLAUDE_REVIEW_APPROVAL_MODE=screen）では、修正と削除をすべて承認待ちにする'
+    return 0
+  fi
+  return 1
+}
+
+# 変更の台帳（Skill change-review の ledger.sh）に、直す前と直した後の版を写す。
+# 引数: <ID> <追加|修正|削除> <元の絶対パス> <直した後の版|-> [<直す前の版>（省略時は .snapshots の複製）]
+ledger_record() {
+  if [ -z "$LEDGER_SH" ]; then
+    printf -- '- %s: 変更の台帳（ledger.sh）が見つからず、台帳に記録できなかった\n' "$1" >>"$skip_out"
+  elif ! bash "$LEDGER_SH" record --id "$1" --kind "memory-audit/$2/$(memory_name "$3")" --target "$3" \
+    --before "${5:-$snap$3}" --after "$4" >/dev/null; then
+    printf -- '- %s: 変更の台帳への記録に失敗した\n' "$1" >>"$skip_out"
+  fi
+}
+
+# 承認なしで反映した変更を1件記録する。ID は last_id に残す（同じ変更に含まれる索引の行の削除を同じ ID で台帳に載せるため）。
+# 引数: <追加|修正|削除> <元の絶対パス> [<直した後の版|->（省略時は元の場所の今の状態）]
+record_auto() {
+  auto_n=$((auto_n + 1))
+  last_id="$(printf 'memory-audit-%s-%02d' "$ts" "$auto_n")"
+  printf -- '- %s: `%s`（%s。種類 `memory-audit/%s/%s`。直す前の版 `%s`）\n' \
+    "$last_id" "$2" "$1" "$1" "$(memory_name "$2")" "$snap$2" >>"$added_out"
+  ledger_record "$last_id" "$1" "$2" "${3:-$2}"
 }
 
 # 承認待ちの案を1件作り、番号を proposed_out へ記録する。引数: <修正|削除> <元の絶対パス> <直した版（削除なら /dev/null）> <理由>
@@ -338,50 +411,10 @@ writeback_reason() {
   return 0
 }
 
-# 精査が正常終了した場合だけ、作業用のフォルダから元の場所へ書き戻す。削除は一切しない。
+# 精査が正常終了した場合だけ、作業用のフォルダから元の場所へ書き戻し、承認の要らない削除を反映する。
 written=0
 if [ "$rc" -eq 0 ]; then
-  while IFS= read -r src; do
-    # 親のディレクトリが対象の作業用での位置と一致する場合だけ、その対象の直下を元の場所とする。
-    dest=""
-    i=0
-    while [ "$i" -lt "${#targets[@]}" ]; do
-      if [ "${src%/*}" = "${staged[$i]}" ]; then
-        dest="${targets[$i]}/${src##*/}"
-        break
-      fi
-      i=$((i + 1))
-    done
-    [ "$src" = "$stage/deletions.tsv" ] && continue
-    case "$src" in "$stage/destinations/"*) continue ;; esac
-    if reason="$(writeback_reason "$src" "$dest")"; then
-      # 削除の候補を指す索引の行の削除は、削除の案に含める。ここでは消された索引の行を戻した版で比べる。
-      if [ "${dest##*/}" = MEMORY.md ] && [ -n "$CR_SCRIPTS" ] && [ -n "$(deleted_names "${dest%/*}")" ]; then
-        # shellcheck disable=SC2046
-        python3 "$CR_SCRIPTS/memory-index.py" keep "$dest" "$src" $(deleted_names "${dest%/*}") >"$tmpd/MEMORY.md.kept" \
-          && src="$tmpd/MEMORY.md.kept"
-      fi
-      if cmp -s "$src" "$dest"; then
-        :
-      elif only_additions "$dest" "$src"; then
-        if cp -p "$src" "$dest"; then
-          written=$((written + 1))
-          printf -- '- `%s`\n' "$dest" >>"$added_out"
-        else
-          printf -- '- `%s`: 書き戻しに失敗した\n' "$dest" >>"$skip_out"
-        fi
-      elif [ -z "$CR_SCRIPTS" ]; then
-        printf -- '- `%s`: 既存の行を変える修正だが、Skill change-review が見つからず承認待ちを作れなかった\n' "$dest" >>"$skip_out"
-      elif ! make_proposal 修正 "$dest" "$src" "memory-audit の自動の精査（${ts}）が作った修正である。既存の行を変える・消すため、自動では反映していない。根拠はレポート ${report} を参照する。"; then
-        printf -- '- `%s`: 承認待ちの作成に失敗した\n' "$dest" >>"$skip_out"
-      fi
-    else
-      printf -- '- `%s`: %s\n' "${dest:-$src}" "$reason" >>"$skip_out"
-    fi
-  done < <(find "$stage" \( -type f -o -type l \) -print | LC_ALL=C sort)
-  log_info "書き戻しました: ${written}件"
-
-  # 削除の候補（claude が deletions.tsv に書いたもの）を、削除の案にする。メモリのファイルは消さない。
+  # 削除の候補（claude が deletions.tsv に書いたもの）を先に振り分ける。索引（MEMORY.md）の扱いが振り分けで変わるためである。
   if [ -f "$stage/deletions.tsv" ]; then
     while IFS=$'\t' read -r dpath dreason || [ -n "$dpath" ]; do
       [ -n "$dpath" ] || continue
@@ -397,14 +430,89 @@ if [ "$rc" -eq 0 ]; then
       esac
       if [ "$ok_target" -ne 1 ] || [ -L "$dpath" ] || [ ! -f "$dpath" ]; then
         printf -- '- `%s`: 削除の候補だが、対象のメモリのディレクトリの直下にある .md ではない\n' "$dpath" >>"$skip_out"
-      elif [ -z "$CR_SCRIPTS" ]; then
-        printf -- '- `%s`: 削除の候補だが、Skill change-review が見つからず承認待ちを作れなかった\n' "$dpath" >>"$skip_out"
-      elif ! make_proposal 削除 "$dpath" /dev/null "memory-audit の自動の精査（${ts}）が挙げた削除の候補である。理由: ${dreason}"; then
-        printf -- '- `%s`: 削除の承認待ちの作成に失敗した\n' "$dpath" >>"$skip_out"
+        continue
+      fi
+      diff -u "$dpath" /dev/null >"$one_diff"
+      if r="$(approval_reason "$dpath" 削除 "$one_diff")"; then
+        printf '%s\t%s\t%s\n' "$dpath" "$dreason" "$r" >>"$del_approval"
+      else
+        printf '%s\t%s\n' "$dpath" "$dreason" >>"$del_auto"
       fi
     done <"$stage/deletions.tsv"
   fi
-  log_info "承認待ちにしました: $(grep -c . "$proposed_out" | tr -d ' ')件"
+
+  while IFS= read -r src; do
+    # 親のディレクトリが対象の作業用での位置と一致する場合だけ、その対象の直下を元の場所とする。
+    dest=""
+    i=0
+    while [ "$i" -lt "${#targets[@]}" ]; do
+      if [ "${src%/*}" = "${staged[$i]}" ]; then
+        dest="${targets[$i]}/${src##*/}"
+        break
+      fi
+      i=$((i + 1))
+    done
+    [ "$src" = "$stage/deletions.tsv" ] && continue
+    [ "$src" = "$NEEDS" ] && continue
+    case "$src" in "$stage/destinations/"*) continue ;; esac
+    if reason="$(writeback_reason "$src" "$dest")"; then
+      # 承認待ちに回す削除の候補を指す索引の行の削除は、削除の案に含める。ここでは消された索引の行を戻した版で比べる。
+      if [ "${dest##*/}" = MEMORY.md ] && [ -n "$CR_SCRIPTS" ] && [ -n "$(deleted_names "${dest%/*}")" ]; then
+        # shellcheck disable=SC2046
+        python3 "$CR_SCRIPTS/memory-index.py" keep "$dest" "$src" $(deleted_names "${dest%/*}") >"$tmpd/MEMORY.md.kept" \
+          && src="$tmpd/MEMORY.md.kept"
+      fi
+      kind=修正
+      only_additions "$dest" "$src" && kind=追加
+      diff -u "$dest" "$src" >"$tmpd/cur.diff"
+      if cmp -s "$src" "$dest"; then
+        :
+      elif ! r="$(approval_reason "$dest" "$kind" "$tmpd/cur.diff")"; then
+        if cp -p "$src" "$dest"; then
+          written=$((written + 1))
+          record_auto "$kind" "$dest"
+        else
+          printf -- '- `%s`: 書き戻しに失敗した\n' "$dest" >>"$skip_out"
+        fi
+      elif [ -z "$CR_SCRIPTS" ]; then
+        printf -- '- `%s`: 既存の行を変える修正だが、Skill change-review が見つからず承認待ちを作れなかった\n' "$dest" >>"$skip_out"
+      elif ! make_proposal 修正 "$dest" "$src" "memory-audit の自動の精査（${ts}）が作った${kind}である。承認待ちに回した理由: ${r}。根拠はレポート ${report} を参照する。"; then
+        printf -- '- `%s`: 承認待ちの作成に失敗した\n' "$dest" >>"$skip_out"
+      fi
+    else
+      printf -- '- `%s`: %s\n' "${dest:-$src}" "$reason" >>"$skip_out"
+    fi
+  done < <(find "$stage" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  log_info "書き戻しました: ${written}件"
+
+  # 承認の要らない削除を反映する。直す前の版は .snapshots にある。同じディレクトリの索引（MEMORY.md）の行も消す。
+  while IFS=$'\t' read -r dpath dreason; do
+    [ -n "$dpath" ] || continue
+    if ! rm -f -- "$dpath"; then
+      printf -- '- `%s`: 削除の反映に失敗した\n' "$dpath" >>"$skip_out"
+      continue
+    fi
+    record_auto 削除 "$dpath" -
+    idx="${dpath%/*}/MEMORY.md"
+    if [ -n "$CR_SCRIPTS" ] && [ -f "$idx" ] && [ ! -L "$idx" ] && grep -Fq "(${dpath##*/})" "$idx"; then
+      cp -p "$idx" "$tmpd/MEMORY.md.before" \
+        && python3 "$CR_SCRIPTS/memory-index.py" drop "$idx" "${dpath##*/}" >"$tmpd/MEMORY.md.dropped" \
+        && cat "$tmpd/MEMORY.md.dropped" >"$idx" \
+        && printf '  - 索引 `%s` の、このメモリを指す行も消した（直す前の版 `%s`）\n' "$idx" "$snap$idx" >>"$added_out" \
+        && ledger_record "$last_id" 修正 "$idx" "$idx" "$tmpd/MEMORY.md.before"
+    fi
+  done <"$del_auto"
+
+  # 承認が要る削除の候補を、削除の案にする。メモリのファイルは消さない。
+  while IFS=$'\t' read -r dpath dreason r; do
+    [ -n "$dpath" ] || continue
+    if [ -z "$CR_SCRIPTS" ]; then
+      printf -- '- `%s`: 削除の候補だが、Skill change-review が見つからず承認待ちを作れなかった\n' "$dpath" >>"$skip_out"
+    elif ! make_proposal 削除 "$dpath" /dev/null "memory-audit の自動の精査（${ts}）が挙げた削除の候補である。理由: ${dreason}。承認待ちに回した理由: ${r}"; then
+      printf -- '- `%s`: 削除の承認待ちの作成に失敗した\n' "$dpath" >>"$skip_out"
+    fi
+  done <"$del_approval"
+  log_info "承認なしで反映しました: ${auto_n}件 / 承認待ちにしました: $(grep -c . "$proposed_out" | tr -d ' ')件"
 else
   log_error "精査が異常終了したため、書き戻しを行いません"
 fi
@@ -415,13 +523,17 @@ for t in "${targets[@]}"; do
 done
 {
   [ -s "$report" ] || printf '# メモリ精査レポート\n\nレポートが作られませんでした（精査の終了コード %s）。\n' "$rc"
-  n_added="$(grep -c . "$added_out" | tr -d ' ')"
   n_prop="$(grep -c . "$proposed_out" | tr -d ' ')"
   ids="$(sed -n 's/^- \([0-9-]*\): .*/\1/p' "$proposed_out" | tr '\n' ' ' | sed 's/ $//; s/ /、/g')"
-  printf '\n## 自動で反映した追加と承認待ち\n\n'
-  printf '自動で反映した追加 %s件 / 承認待ちにした %s件（%s）（スクリプトが追記した）。\n' "$n_added" "$n_prop" "${ids:-なし}"
-  printf '既存の行を変えない・消さない変更だけを自動で反映し、それ以外の修正と削除の候補は Skill change-review の承認待ち（%s）にした。\n' "$PROPOSALS_DIR"
-  if [ -s "$added_out" ]; then printf '\n### 自動で反映した追加\n\n'; cat "$added_out"; fi
+  printf '\n## 承認なしで反映した変更と承認待ち\n\n'
+  printf '承認なしで反映した変更 %s件 / 承認待ちにした %s件（%s）（スクリプトが追記した）。\n' "$auto_n" "$n_prop" "${ids:-なし}"
+  printf '承認が要ると判断した変更だけを Skill change-review の承認待ち（%s）にし、それ以外は反映した。\n' "$PROPOSALS_DIR"
+  if [ -s "$added_out" ]; then
+    printf '\n### 承認なしで反映した変更\n\n'
+    printf '戻すときは、Skill change-review の scripts/revert.sh に ID を渡す（変更の台帳 %s から直す前の版を戻す。索引の行も戻る）。誤りだった場合は、' "$(bash "${LEDGER_SH:-/dev/null}" path 2>/dev/null)"
+    printf 'Skill change-review の「8. 訂正」の手順で直し、訂正リスト（%s）に ID と「正しくは○○」を書く。\n\n' "$CORRECTIONS"
+    cat "$added_out"
+  fi
   if [ -s "$proposed_out" ]; then printf '\n### 承認待ちにした変更\n\n'; cat "$proposed_out"; fi
   printf '\n## 書き戻さなかったファイル\n\n'
   printf '作業用のフォルダ %s のうち、元のメモリへ書き戻さなかったファイルである（スクリプトが追記した）。\n\n' "$stage"

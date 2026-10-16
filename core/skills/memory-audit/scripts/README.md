@@ -1,6 +1,6 @@
 # memory-audit scripts
 
-Skill `memory-audit` を週1回、非対話で起動するためのスクリプトである。起動の前に対象のメモリを複製する。claude には直した版を作業用のフォルダへ書かせ、正常終了した場合だけ、スクリプトが条件を満たすファイルのうち追加だけの変更を元のメモリへ書き戻し、既存の行を変える修正と削除の候補は Skill `change-review` の承認待ちにする。最後に複製との差分をレポートへ足す。
+Skill `memory-audit` を週1回、非対話で起動するためのスクリプトである。起動の前に対象のメモリを複製する。claude には直した版を作業用のフォルダへ書かせ、正常終了した場合だけ、スクリプトが変更と削除の候補ごとに承認が要るかを判定し、要らないものは元のメモリへ反映し（書き戻し・削除）、要るものは Skill `change-review` の承認待ちにする。最後に複製との差分をレポートへ足す。
 
 `claude -p` では `~/.claude` 配下（メモリの置き場所）が保護対象のファイルとして扱われ、`--allowedTools` で Edit を許可しても書き込めない（メッセージは "Claude requested permissions to edit ... which is a sensitive file."）。このため、メモリへの書き込みは claude ではなく `run.sh` が行う。
 
@@ -24,7 +24,11 @@ Skill `memory-audit` を週1回、非対話で起動するためのスクリプ�
 | `CLAUDE_LAUNCHER` | `claude` | 起動するコマンド。空白で区切った語のうち `{job}` はジョブ名（`memory-audit`）に置き換える。別のアカウントで起動するラッパーを使う場合に指定する。検査では偽のスクリプトを指定する |
 | `CLAUDE_REVIEW_CONFIG_DIRS` | `$HOME/.claude` | Claude の設定ディレクトリの一覧（コロン区切り）。存在するものだけを使う。2つ目の設定ディレクトリを使う場合はここに足す |
 | `CLAUDE_REVIEW_DENY_READ` | なし | 読み取りを拒否する追加の場所（コロン区切り）。クラウドストレージの同期フォルダ等を指定する |
-| `CLAUDE_REVIEW_JOBS_CONF` | `${XDG_CONFIG_HOME:-~/.config}/claude-review-inbox/jobs.conf` | 上の3つを書く共通の設定ファイル |
+| `CLAUDE_REVIEW_JOBS_CONF` | `${XDG_CONFIG_HOME:-~/.config}/claude-review-inbox/jobs.conf` | 上の3つと下の4つを書く共通の設定ファイル |
+| `CLAUDE_REVIEW_APPROVAL_MODE` | `screen` | 承認の進め方。`screen`（承認あり）では修正・削除をすべて承認待ちにし、`auto`（承認なし）では承認が要るものだけを承認待ちにする |
+| `CLAUDE_CHANGE_LEDGER` | `$HOME/.local/state/claude-change-ledger` | 変更の台帳（Skill `change-review` の `ledger.sh`）。承認なしで反映した変更の直す前と直した後の版をコミットする |
+| `SKILL_AUDIT_PROTECTED` | `security-rules commit-guard` | claude の書き換えを拒否する安全のための規則のスキル（空白区切り） |
+| `CLAUDE_REVIEW_GUARDED_PATHS` | 各スキルの `scripts/`（フックと定期実行のスクリプト） | claude の書き換えを拒否するスクリプト（コロン区切り。スキルの置き場所からの相対パスか絶対パス） |
 
 `CLAUDE_LAUNCHER`・`CLAUDE_REVIEW_CONFIG_DIRS`・`CLAUDE_REVIEW_DENY_READ` は、共通の設定ファイル（jobs.conf）に `名前=値` の形で書いてもよい。環境変数が設定ファイルより優先する。値の先頭の `~` は HOME に置き換える。jobs.conf は feedback-mining・skill-audit・secret-patrol も読む。
 
@@ -70,17 +74,18 @@ $CONFIG_DIR/projects/*/memory
 cwd をレポートの置き場所（`REPORTS_ROOT/memory-audit/`）にして、次を起動する。`<CLAUDE_LAUNCHER>` の既定は `claude` である。
 
 ```text
-<CLAUDE_LAUNCHER> -p "<依頼文>" --model opus --effort low --allowedTools ... --disallowedTools ...
+<CLAUDE_LAUNCHER> -p "<依頼文>" --model opus --effort low --permission-mode default --allowedTools ... --disallowedTools ...
 ```
 
-依頼文: 「Skill memory-audit を自動モードで実行する。対象のメモリは <対象ディレクトリを空白区切り>、直す前の複製は <.snapshots のパス>、直した版の書き込み先は <.staging のパス>（元の絶対パスの構造を保ち、.claude で始まる要素は先頭のドットを外して写す）、レポートの出力先は <レポートのパス>。対象ごとの元の位置と書き込み先での位置は次のとおり: <元の位置> → <作業用での位置>、…（対象ごとに読点で区切る）。メモリは直接直さず、書き込み先へ直した版を書く。否認リストは <承認待ちの置き場所>/rejections.md にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は作らない。利用者の環境だけの決まりは <上書きファイル> にある（無ければ飛ばす）。削除の候補は <.staging のパス>/deletions.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く。削除の候補のメモリを指す索引（MEMORY.md）の行は消さない（シェルが削除の案に含める）。<行き先の表と移し先の書き方（change-review/scripts/destinations.sh --print-rule <.staging のパス>/destinations の出力）>」
+依頼文: 「Skill memory-audit を自動モードで実行する。対象のメモリは <対象ディレクトリを空白区切り>、直す前の複製は <.snapshots のパス>、直した版の書き込み先は <.staging のパス>（元の絶対パスの構造を保ち、.claude で始まる要素は先頭のドットを外して写す）、レポートの出力先は <レポートのパス>。対象ごとの元の位置と書き込み先での位置は次のとおり: <元の位置> → <作業用での位置>、…（対象ごとに読点で区切る）。メモリは直接直さず、書き込み先へ直した版を書く。否認リストは <承認待ちの置き場所>/rejections.md にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は作らない。利用者の環境だけの決まりは <上書きファイル> にある（無ければ飛ばす）。削除の候補は <.staging のパス>/deletions.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く。削除の候補のメモリを指す索引（MEMORY.md）の行は消さない（シェルが、削除を反映するときに消すか、削除の案に含める）。訂正リストは <承認待ちの置き場所>/corrections.md にある。否認リストと同じく始める前に読み、訂正された変更を再び行わない。承認が要らないと判断した修正・削除・統合は、そのまま反映される。承認が要ると判断したもの（SKILL.md「0.1」の承認待ちに回すもの、判断に迷うもの）は、<.staging のパス>/needs-approval.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く（シェルが承認待ちにする）。<行き先の表と移し先の書き方（change-review/scripts/destinations.sh --print-rule <.staging のパス>/destinations の出力）>」
 
 | 区分 | 規則 |
 | --- | --- |
 | 許可 | `Skill` `Bash(which:*)`、`Read(/<範囲>/**)`（各設定ディレクトリ・`~/.agents`・`REPORTS_ROOT`・`STATE_BASE`・承認待ちの置き場所・スキルの置き場所の直下にあるリンクの実体）、`Read(/<上書きファイル>)`、`Edit(/<REPORTS_ROOT>/memory-audit/.staging/<日時>/**)`、`Edit(/<REPORTS_ROOT>/memory-audit/*.md)` |
-| 拒否 | `Read(/<HOME>/Library/CloudStorage/**)`、`CLAUDE_REVIEW_DENY_READ` の各場所の `Read(/<場所>/**)`、`Edit(/<REPORTS_ROOT>/memory-audit/.snapshots/**)`、設定ディレクトリごとの `Edit(/<設定ディレクトリ>/CLAUDE.md)` `Edit(/<設定ディレクトリ>/settings.json)` `Edit(/<設定ディレクトリ>/skills/**)`、`Edit(/<HOME>/Documents/**)`、`Edit(/<承認待ちの置き場所>/**)`、`Edit(/<台帳の置き場所>/**)`、対象ごとの `Edit(/<対象>/**)`。CLAUDE.md・settings.json がリンクなら実体のパスでも拒否する |
+| 拒否 | `Read(/<HOME>/Library/CloudStorage/**)`、`CLAUDE_REVIEW_DENY_READ` の各場所の `Read(/<場所>/**)`、`Edit(/<REPORTS_ROOT>/memory-audit/.snapshots/**)`、設定ディレクトリごとの `Edit(/<設定ディレクトリ>/CLAUDE.md)` `Edit(/<設定ディレクトリ>/settings.json)` `Edit(/<設定ディレクトリ>/skills/**)`、`Edit(/<HOME>/Documents/**)`、`Edit(/<承認待ちの置き場所>/**)`、`Edit(/<台帳の置き場所>/**)`、対象ごとの `Edit(/<対象>/**)`。CLAUDE.md・settings.json がリンクなら実体のパスでも拒否する。南京錠として、`change-review/scripts/link-scopes.sh` の `guard_deny_rules` が出す規則（安全のための規則のスキル全体・フックと定期実行のスクリプト・`settings.local.json`・変更の台帳を、リンクの表記と実体のパスの両方で）も拒否する |
 
-rm・mv・aws・curl は許可しない。メモリの削除は自動では行わず、削除の候補を `deletions.tsv` に書かせる。
+`--permission-mode default` を付け、settings.json の `defaultMode`（acceptEdits 等）で作業場所の中の編集が通らないようにする。`link-scopes.sh` を読み込めなければ、拒否の規則を作れないため起動せずに終了コード1で終わる。
+rm・mv・aws・curl は許可しない。claude にはメモリを削除させず、削除の候補を `deletions.tsv` に書かせる（削除はスクリプトが行う）。
 承認待ちの置き場所は `CLAUDE_REVIEW_PROPOSALS`（既定 `REPORTS_ROOT/proposals`）、判断の台帳の置き場所は `CLAUDE_REVIEW_STATE`（既定 `~/.local/state/claude-review-inbox`）である。台帳への書き込みを claude に許すと、画面のボタンを経ない承認を作れてしまうため拒否する。
 
 ## 書き戻し
@@ -97,17 +102,26 @@ claude が終了コード0で終わった場合だけ、`.staging/<日時>/` 配
 
 満たさないファイルは書き戻さず、レポートの末尾に「書き戻さなかったファイル」の節としてパスと理由を足す。パスは、対象に当たったファイルは元の場所、当たらなかったファイルは作業用のフォルダでのパスを書く。該当が無ければ「なし」と書く。claude が異常終了した場合は何も書き戻さず、その旨を同じ節に書く。
 
-### 追加だけを書き戻し、それ以外は承認待ちにする
+### 承認が要らない変更は反映し、要る変更は承認待ちにする
 
-上の条件を満たしたファイルは、元の場所と比べて次のとおり扱う。
+上の条件を満たしたファイルは、元の場所と比べ、同じでなければ承認が要るかを判定する（`approval_reason`）。次のどれかに当たれば承認が要る。
+
+| 条件 | 判定のしかた |
+| --- | --- |
+| claude が承認が要ると判断した | `<.staging のパス>/needs-approval.tsv` の1列目が元の絶対パスと一致する |
+| 同じ種類が訂正リストで2回訂正されている | `change-review/scripts/corrections.sh count memory-audit/<追加\|修正\|削除>/<プロジェクト>/<ファイル名>` が2以上 |
+| 安全のための規則の記述を消す・変える | 差分の `-` 行が `permissions.deny`・`gitleaks`・`秘密の検査`・`security-rules`・`commit-guard` を含む |
+| 消える記述を移し先へ書き足す必要がある | 行き先のフォルダに `moves.tsv` がある、または `table.md` に「（候補なし）」がある |
+| `change-review` が見つからない | 修正と削除だけ承認が要るとみなす（訂正リストを読めないため）。追加は書き戻す |
+| 承認の進め方が承認あり（`CLAUDE_REVIEW_APPROVAL_MODE=screen`。既定） | 修正と削除はすべて承認が要る。追加は書き戻す |
 
 | 比べた結果 | 扱い |
 | --- | --- |
 | 同じ | 何もしない |
-| `diff -u` に `-` の行が無い（既存の行を変えない・消さない） | 書き戻す。レポートの「自動で反映した追加」に載せる |
-| `-` の行がある | 書き戻さない。`change-review/scripts/diff-label.sh` で見出しを元の絶対パスにした差分を作り、`propose.sh` で承認待ちを1件作る |
+| 承認が要らない（追加・修正） | 書き戻す。ID（`memory-audit-<日時>-<連番>`）を振り、レポートの「承認なしで反映した変更」に種類と直す前の版（`.snapshots` の下のパス）とともに載せる。`change-review/scripts/ledger.sh record` で直す前と直した後の版を変更の台帳にコミットする（失敗したら「書き戻さなかったファイル」に書く） |
+| 承認が要る | 書き戻さない。`change-review/scripts/diff-label.sh` で見出しを元の絶対パスにした差分を作り、`propose.sh` で承認待ちを1件作る。理由に判定の根拠を書く |
 
-`deletions.tsv` の各行は、元の絶対パスが対象のメモリのディレクトリの直下にある `.md`（`..` を含まない、シンボリックリンクでない、実在する）なら削除の差分の承認待ちにする。それ以外は「書き戻さなかったファイル」に理由を書く。
+`deletions.tsv` の各行は、元の絶対パスが対象のメモリのディレクトリの直下にある `.md`（`..` を含まない、シンボリックリンクでない、実在する）なら同じく判定する。承認が要らなければファイルを消し、同じディレクトリの `MEMORY.md` のうちそのファイルを指す行も消し（`memory-index.py drop`）、ID を振って記録する。変更の台帳には、削除と索引の行の削除を同じ ID で記録する（`revert.sh <ID>` で両方が戻る）。承認が要れば削除の差分の承認待ちにする。条件を満たさない行は「書き戻さなかったファイル」に理由を書く。削除の候補の振り分けは、`MEMORY.md` の書き戻しより先に行う。
 
 ### 消える記述の行き先と、索引の行
 
@@ -119,15 +133,15 @@ claude が終了コード0で終わった場合だけ、`.staging/<日時>/` 配
 | 移し先への追加の差分 | 同じフォルダの `moves.tsv`（「移し先の絶対パス<TAB>書き足した後の版のファイル名」）。移し先は各設定ディレクトリの下の実在するファイルに限り、既存の行を変える版は認めない。移し先へは書き戻さない |
 | 索引（`MEMORY.md`）の行の削除 | 削除の案だけ。同じディレクトリの `MEMORY.md` のうち `(<ファイル名>)` を含む行を消す差分 |
 
-claude が `.staging` の `MEMORY.md` で削除の候補を指す行を消していた場合は、その行を戻した版で比べる（`change-review/scripts/memory-index.py keep`）。索引の行の削除だけの案は作らない。`destinations/` の下は書き戻しの対象にしない。
+claude が `.staging` の `MEMORY.md` で、承認待ちに回す削除の候補を指す行を消していた場合は、その行を戻した版で比べる（`change-review/scripts/memory-index.py keep`）。索引の行の削除だけの案は作らない。`destinations/`・`deletions.tsv`・`needs-approval.tsv` は書き戻しの対象にしない。
 
 依頼文には、表と移し先の書き方（`destinations.sh --print-rule` の出力）を足す。
 
-`change-review` の scripts は、`CHANGE_REVIEW_SCRIPTS`、`<このスクリプトの場所>/../../change-review/scripts`（スキル置き場の change-review）、各設定ディレクトリの `skills/change-review/scripts` の順に探す。見つからなければ、修正は書き戻さず承認待ちも作らず、「書き戻さなかったファイル」に理由を書く。
+`change-review` の scripts は、`CHANGE_REVIEW_SCRIPTS`、`<このスクリプトの場所>/../../change-review/scripts`（スキル置き場の change-review）、各設定ディレクトリの `skills/change-review/scripts` の順に探す。見つからなければ、修正と削除は反映せず承認待ちも作らず、「書き戻さなかったファイル」に理由を書く。
 
-レポートには「自動で反映した追加と承認待ち」の節を足し、「自動で反映した追加 N件 / 承認待ちにした N件（番号）」と各ファイルを書く。
+レポートには「承認なしで反映した変更と承認待ち」の節を足し、「承認なしで反映した変更 N件 / 承認待ちにした N件（番号）」、反映した変更ごとの ID・種類・直す前の版、訂正の手順（Skill `change-review` の「8.」）と訂正リストの場所を書く。
 
-書き戻しで削除は一切しない。作業用のフォルダも自動では消さない。
+メモリのファイルを消すのは、承認が要らない削除の候補だけである。作業用のフォルダと `.snapshots` は自動では消さない。
 
 ## 変更の差分
 
@@ -142,8 +156,8 @@ claude が `.staging` の `MEMORY.md` で削除の候補を指す行を消して
 2. 通常実行では、以降の出力を `STATE_DIR/logs/<YYYY-MM-DD-HHMMSS>.log` へ書く。30件を超えた古いログは削除する。
 3. targets.conf を展開し、対象を複製し、作業用のフォルダを作る。
 4. `CLAUDE_LAUNCHER`（既定 `claude`）を起動する。起動に使うコマンドをログに書く。
-5. 正常終了した場合だけ、作業用のフォルダから追加だけの変更を書き戻し、それ以外の修正と削除の候補を承認待ちにする。
-6. 自動で反映した追加と承認待ち、書き戻さなかったファイル、差分をレポートへ足す。
+5. 正常終了した場合だけ、削除の候補を振り分け、作業用のフォルダから承認の要らない変更を書き戻し、承認の要らない削除を反映し、承認が要る変更と削除の候補を承認待ちにする。
+6. 承認なしで反映した変更と承認待ち、書き戻さなかったファイル、差分をレポートへ足す。
 
 ### --dry-run の扱い
 

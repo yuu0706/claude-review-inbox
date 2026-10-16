@@ -102,9 +102,11 @@ check "自作のリンクは対象" 'is_target ownskill'
 check "外部のリンク・実体の無いリンク・synced は対象外" '! is_target extskill && ! is_target broken && ! is_target synced'
 check "trash-skill.sh はリンクのスキルを移動しない" '! "$REPO/core/skills/skill-audit/scripts/trash-skill.sh" ownskill >/dev/null 2>&1 && [ -L "$SK/ownskill" ]'
 
-echo "== skill-audit: 自作のリンクの実体への修正は戻して承認待ちにする（偽の claude）"
+echo "== skill-audit: 自作のリンクの実体への修正は、承認が要るなら戻して承認待ちにする（偽の claude）"
 cat >"$HOME/.local/bin/claude" <<EOF
 #!/bin/bash
+N="\$(printf '%s\n' "\$@" | grep -o '/[A-Za-z0-9._/-]*/needs-approval.tsv' | head -1)"
+printf '%s\t%s\n' "$SK/ownskill" "判断に迷う" >"\$N"
 printf '# own changed\n' >"$OWN/SKILL.md"
 printf 'added\n' >"$OWN/new.md"
 exit 0

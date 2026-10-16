@@ -91,7 +91,8 @@ export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 # 偽の HOME。~/.claude/skills は2つ目の設定ディレクトリの skills へのリンクにする（設定ディレクトリを2つ持つ環境と同じ形）。
 export HOME="$WORK/home"
 repo_skills() { local s; for s in "$REPO"/core/skills/*; do [ -d "$s" ] && printf '%s\n' "$s"; done; }
-unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF
+unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF \
+  CLAUDE_REVIEW_APPROVAL_MODE
 # 2つ目の設定ディレクトリは、共通の設定ファイル（jobs.conf）で指定する。
 mkdir -p "$HOME/.config/claude-review-inbox"
 printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude:~/%s\n' "$ALT_DIR" >"$HOME/.config/claude-review-inbox/jobs.conf"
@@ -307,6 +308,26 @@ echo "== 試しの通知: --dry-run では出さない"
 "$REPO/install.sh" --dry-run >/dev/null 2>&1
 check "terminal-notifier と open を呼ばない" '! grep -q "^terminal-notifier\|^open" "$CALLS"'
 mv -f "$FAKEBIN/terminal-notifier" "$WORK/terminal-notifier-link.unused"
+
+echo "== 承認なし（auto）では承認の画面のサーバーを登録しない"
+JC="$HOME/.config/claude-review-inbox/jobs.conf"
+cp -p "$JC" "$WORK/jobs.conf.saved"
+"$REPO/install.sh" >/dev/null 2>&1
+check "承認あり（既定）では plist を置いている" '[ -f "$PLIST" ] && [ -e "$FAKE_LAUNCHD/$LABEL" ]'
+printf 'CLAUDE_REVIEW_APPROVAL_MODE=auto\n' >>"$JC"
+: >"$CALLS"
+out="$("$REPO/install.sh" 2>&1)"
+rc=$?
+check "終了コード0" '[ "$rc" -eq 0 ]'
+check "登録済みのサーバーを外し、plist を消す" 'grep -Fxq "launchctl bootout gui/$(id -u)/$LABEL" "$CALLS" && [ ! -e "$PLIST" ] && [ ! -e "$FAKE_LAUNCHD/$LABEL" ]'
+check "サーバーを登録しない" '! grep -q "^launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
+check "フックは足す" 'each_hook_once "$HOME/.claude/settings.json"'
+check "画面の URL ではなく会話で承認する案内を出す" '! printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/" && printf "%s" "$out" | grep -Fq "入れました（承認なし）"'
+out="$("$REPO/install.sh" --dry-run 2>&1)"
+check "--dry-run でも plist を書く操作を出さない" '! printf "%s" "$out" | grep -q "plist を書きます" && ! printf "%s" "$out" | grep -q "launchctl bootstrap gui/$(id -u) $PLIST"'
+out="$(CLAUDE_REVIEW_APPROVAL_MODE=screen "$REPO/install.sh" 2>&1)"
+check "環境変数が jobs.conf より優先する" '[ -f "$PLIST" ] && printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/"'
+cp -p "$WORK/jobs.conf.saved" "$JC"
 
 echo "== 不明な引数"
 "$REPO/install.sh" --nosuch >/dev/null 2>&1

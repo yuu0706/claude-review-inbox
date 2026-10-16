@@ -5,12 +5,14 @@ Python 3.9 の標準ライブラリと /usr/bin/patch だけで動く。claude �
 
 処理の順序（SKILL.md「4. 反映」）:
   1. status を approved にして台帳に記録する（proposal_lib.decide）。
-  2. 自動で反映してよい案かを判定する（blockers）。当たれば approved のまま残す。
+  2. 差分を読み取れるか・書き込む先が許されるか（改ざん対策）を確かめる（blockers）。当たれば approved のまま残す。
+     移し先への追記・索引の行の削除・スキルの全ファイルの削除は案の差分に入っており、判断を挟まずにそのまま反映する。
   3. approved.py と同じ判定（approved.judge）を通ることを確かめる。
   4. 各ファイルの一時的な複製へ patch を当て、今のファイルにそのまま当たるかを確かめる。
      1つでも当たらなければ何も書かず、status を hold にする。
   5. 直す前の版を <案の置き場所>/.backup/<YYYY-MM-DD>/ に複製してから、対象のファイルを置き換える。
-  6. status を applied にし、applied の日時を書き、台帳に to: applied の行を足す。
+  6. status を applied にし、applied の日時を書き、台帳に to: applied の行を足す。targets のフォルダ（スキルの削除）が
+     空になっていれば消す。
   7. 途中で失敗したら、置き換えたファイルを複製から戻し、status を hold にする。
 """
 
@@ -28,9 +30,6 @@ import approved as approved_mod
 PATCH = os.environ.get("CLAUDE_REVIEW_PATCH") or "/usr/bin/patch"
 FENCE_RE = re.compile(r"^(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)\s*$")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-MOVE_CHECK = "（移し先の確認が必要）"
-# 削除の手段（スキルの退避のスクリプト等）が理由に書かれた案は、Claude が反映する。
-DELETE_TOOL_RE = re.compile(r"trash-skill|退避")
 
 # 結果の種類
 APPLIED = "applied"            # 反映できた
@@ -71,19 +70,6 @@ class FilePatch(object):
 
     def old_lines(self, hunk):
         return [ln[1:] for ln in hunk[4] if ln[:1] in (" ", "-")]
-
-
-def section_text(body, title):
-    """「## <title>」の節の本文を返す。無ければ空文字。"""
-    out = []
-    inside = False
-    for line in body.splitlines():
-        if re.match(r"^##\s+", line):
-            inside = re.sub(r"^##\s+", "", line).strip() == title
-            continue
-        if inside:
-            out.append(line)
-    return "\n".join(out)
 
 
 def diff_blocks(body):
@@ -183,13 +169,18 @@ def _within(path, root):
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def dir_targets(targets):
+    """targets のうちフォルダのもの（スキルの削除の案）を返す。"""
+    return [t for t in targets if os.path.isdir(t)]
+
+
 def check_target(path, targets, directory, home):
     """差分のパスが書き込んでよい先かを確かめ、理由（だめなとき）か None を返す。"""
     if not path.startswith("/"):
         return "差分のパスが絶対パスではない: %s" % path
     if "\x00" in path or any(part == ".." for part in path.split("/")):
         return "差分のパスに .. が含まれている: %s" % path
-    if path not in targets:
+    if path not in targets and not any(_within(path, d) for d in dir_targets(targets)):
         return "差分のファイルが targets に無い: %s" % path
     real = os.path.realpath(path)
     if not _within(real, home):
@@ -203,20 +194,16 @@ def check_target(path, targets, directory, home):
 
 
 def blockers(proposal, directory, home=None):
-    """自動で反映しない理由のリストと、読み取った差分を返す。理由が空なら自動で反映してよい。"""
+    """自動で反映しない理由のリストと、読み取った差分を返す。理由が空なら自動で反映してよい。
+
+    案は、移し先への追記・索引の行の削除・スキルの全ファイルの削除を含めた全差分を持つ。承認は差分の全体への承認であり、
+    反映の段で Claude の判断（移し先の確認・「移さない」・削除の手段）を挟まない（2026-10-16 指示）。
+    ここで止めるのは、差分を読み取れない案と、書き込む先が許されない案（改ざん対策）だけである。
+    """
     home = home or home_dir()
     reasons = []
     meta = proposal.meta
     targets = [os.path.expanduser(t) for t in (meta.get("targets") or [])]
-    if MOVE_CHECK in (proposal.heading or ""):
-        reasons.append("移し先の確認が必要な案である")
-    if "移さない" in (meta.get("note") or ""):
-        reasons.append("メモに「移さない」の指示がある")
-    if DELETE_TOOL_RE.search(section_text(proposal.body, "理由")):
-        reasons.append("理由に削除の手段（退避のスクリプト等）が書かれている")
-    for t in targets:
-        if os.path.isdir(t):
-            reasons.append("targets にフォルダがある: %s" % t)
     files = []
     try:
         blocks = diff_blocks(proposal.body)
@@ -227,9 +214,13 @@ def blockers(proposal, directory, home=None):
     except ValueError as e:
         reasons.append("差分を読み取れない（%s）" % e)
         return reasons, []
+    # 削除で消してよいのはふつうのファイルだけである。リンクを当てると、リンクの先（別の場所の実体）を消してしまう。
+    for t in dir_targets(targets):
+        if os.path.islink(t.rstrip("/")):
+            reasons.append("targets のフォルダがリンクである（リンクの先の実体は消さない）: %s" % t)
     for fp in files:
-        if fp.deletes and os.path.basename(fp.path) == "SKILL.md":
-            reasons.append("スキルの削除を含む: %s" % fp.path)
+        if fp.deletes and os.path.islink(fp.path):
+            reasons.append("削除の対象がリンクである（リンクの先の実体は消さない）: %s" % fp.path)
         r = check_target(fp.path, targets, directory, home)
         if r:
             reasons.append(r)
@@ -401,6 +392,18 @@ class _FileLock(object):
         self.f.close()
 
 
+def prune_empty_dirs(dirs):
+    """スキルの削除の案で、全ファイルを消した後に空になったフォルダを消す。ファイルが残るフォルダは消さない。"""
+    for d in dirs:
+        if not os.path.isdir(d) or os.path.islink(d):
+            continue
+        for root, _subdirs, _files in os.walk(d, topdown=False):
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+
+
 def _hold(directory, name, reason, note):
     text = reason
     if note:
@@ -428,6 +431,7 @@ def approve_and_apply(directory, name, note, home=None):
             except (ValueError, OSError, subprocess.SubprocessError) as e:
                 reason = "反映時に差分が今のファイルと一致しなかった（%s 確認。%s）" % (stamp, e)
                 return Result(MISMATCH, reason, _hold(directory, name, reason, note))
+            folders = dir_targets([os.path.expanduser(t) for t in (p.meta.get("targets") or [])])
             try:
                 done = commit(order, result, directory, p.id, home)
             except (OSError, ValueError) as e:
@@ -439,6 +443,8 @@ def approve_and_apply(directory, name, note, home=None):
                 rollback(done)
                 reason = "反映済みの記録に失敗したため元に戻した（%s。%s）" % (stamp, e)
                 return Result(MISMATCH, reason, _hold(directory, name, reason, note))
+            # 戻す必要が無くなってから消す（戻すときに元のフォルダが要るため）。
+            prune_empty_dirs(folders)
             return Result(APPLIED, "", newp)
         finally:
             shutil.rmtree(work, ignore_errors=True)

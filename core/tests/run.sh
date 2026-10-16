@@ -35,6 +35,9 @@ run_test "core: install.sh の定期実行" bash "$TESTS_DIR/test_install_schedu
 run_test "core: install.sh の必要なものの確認" bash "$TESTS_DIR/test_install_prereq.sh"
 run_test "core: リンクの先の実体の許可と拒否" bash "$TESTS_DIR/test_link_scopes.sh"
 run_test "core: 消える記述の行き先" bash "$TESTS_DIR/test_destinations.sh"
+run_test "core: 訂正リスト" bash "$TESTS_DIR/test_corrections.sh"
+run_test "core: 書き換えを拒否する規則（南京錠）" bash "$TESTS_DIR/test_guard_rules.sh"
+run_test "core: 変更の台帳と会話の開始時の知らせ" bash "$TESTS_DIR/test_ledger.sh"
 run_test "skill: memory-audit の作成したリポジトリの記録" bash "$REPO/core/skills/memory-audit/scripts/test-tag.sh"
 for t in "$REPO"/core/skills/*/scripts/test.sh; do
   [ -f "$t" ] || continue

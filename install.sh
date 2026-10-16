@@ -10,6 +10,8 @@
 # 環境変数:
 #   CLAUDE_REVIEW_LABEL   launchd のラベル（既定 com.<ユーザー名>.claude-review-inbox。ユーザー名のドットはハイフンに置き換える）
 #   CLAUDE_REVIEW_PORT    画面のポート（既定 8010）
+#   CLAUDE_REVIEW_APPROVAL_MODE  承認の進め方（screen: 承認あり・画面を常駐させる（既定）、auto: 承認なし・画面を登録しない）。
+#                         jobs.conf（<XDG_CONFIG_HOME>/claude-review-inbox/jobs.conf）の同名の行でも指定できる
 #   CLAUDE_REVIEW_PYTHON  サーバーを動かす Python 3.9 以上（既定 /usr/bin/python3。Xcode のコマンドラインツールが必要）
 #   XDG_CONFIG_HOME       見回りの範囲の設定ファイル（<XDG_CONFIG_HOME>/claude-review-inbox/patrol.conf）の置き場所（既定 ~/.config）
 set -euo pipefail
@@ -35,7 +37,7 @@ for arg in "$@"; do
       schedule_opt="$arg"
       ;;
     --yes) assume_yes=1 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) printf 'ERROR: 不明な引数です: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -118,6 +120,14 @@ config_list="${CLAUDE_REVIEW_CONFIG_DIRS:-}"
 if [ -z "$config_list" ] && [ -f "$JOBS_CONF" ]; then
   config_list="$(sed -n 's/^CLAUDE_REVIEW_CONFIG_DIRS=//p' "$JOBS_CONF" | tail -n 1)"
 fi
+# 承認の進め方。環境変数 CLAUDE_REVIEW_APPROVAL_MODE、jobs.conf、既定（screen）の順に決める。
+#   screen  承認あり。承認の画面のサーバーを常駐させる
+#   auto    承認なし。承認の画面のサーバーを登録しない（承認が要るものは会話で承認する）
+APPROVAL_MODE="${CLAUDE_REVIEW_APPROVAL_MODE:-}"
+if [ -z "$APPROVAL_MODE" ] && [ -f "$JOBS_CONF" ]; then
+  APPROVAL_MODE="$(sed -n 's/^CLAUDE_REVIEW_APPROVAL_MODE=//p' "$JOBS_CONF" | tail -n 1)"
+fi
+[ "$APPROVAL_MODE" = auto ] || APPROVAL_MODE=screen
 config_dirs=("$HOME/.claude")
 IFS=: read -r -a config_items <<<"$config_list"
 for c in ${config_items[@]+"${config_items[@]}"}; do
@@ -808,10 +818,18 @@ done
 # 5.（plist とログの置き場所に先に使う）案の置き場所と状態の置き場所
 run mkdir -p "$PROPOSALS_DIR" "$STATE_DIR"
 
-# 3. launchd
-write_plist
-bootout_if_registered
-run launchctl bootstrap "gui/$uid" "$PLIST"
+# 3. launchd（承認の画面のサーバー）。承認なし（auto）では画面を使わないため、登録せず、登録済みなら外す。
+if [ "$APPROVAL_MODE" = auto ]; then
+  info "承認なし（CLAUDE_REVIEW_APPROVAL_MODE=auto）のため、承認の画面のサーバーを登録しません（設定: ${JOBS_CONF}）"
+  bootout_if_registered
+  if [ -e "$PLIST" ]; then
+    run rm "$PLIST"
+  fi
+else
+  write_plist
+  bootout_if_registered
+  run launchctl bootstrap "gui/$uid" "$PLIST"
+fi
 
 # 3.5 定期実行
 # 旧版が登録した週1回の棚卸し（review-loop）は、週1回の見直しの3つに置き換わったため外す。
@@ -858,5 +876,9 @@ for f in "${settings_files[@]}"; do
 done
 
 info ""
-info "入れました。承認待ちの画面: http://127.0.0.1:$PORT/"
+if [ "$APPROVAL_MODE" = auto ]; then
+  info "入れました（承認なし）。承認待ちは会話の開始時に件数が出ます。会話で「反映して」と伝えると反映します。"
+else
+  info "入れました。承認待ちの画面: http://127.0.0.1:$PORT/"
+fi
 info "通知が出ない場合は、README の「5. 通知の許可」と「困ったとき」を参照してください。"

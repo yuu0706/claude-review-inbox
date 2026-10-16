@@ -16,7 +16,8 @@ Claude Code の決まり（スキル・メモリ・CLAUDE.md）を直す変更�
 - 画面は `http://127.0.0.1:8010/` である。手元で常に動く小さな HTTP サーバー（launchd の LaunchAgent）が表示する。
 - 承認待ちが増えると、サーバーが macOS の通知を出す。通知を押すと、一覧の画面でその案のカードが開く。
 - 却下した変更は否認リスト（`~/claude-reports/proposals/rejections.md`）に残る。案を出す側は、出す前に否認リストを読み、同じ対象・同じ趣旨の修正・削除を二度と出さない。
-- 画面の「承認して反映」を押すと、サーバーが承認を記録し、続けて案の差分を対象のファイルへ `patch` で当てる（`claude` は使わない）。スキルの削除・移し先の確認が必要な案など、自動では反映しない案は承認済みのまま残り、利用者が会話で「承認分を反映して」と言ったときに Claude が反映する（「3.4」）。
+- 画面の「承認して反映」を押すと、サーバーが承認を記録し、続けて案の差分を対象のファイルへ `patch` で当てる（`claude` は使わない）。案には移し先への追記・索引の行の削除・スキルの全ファイルの削除を含めた全差分が入っており、承認されればそのまま反映する（「3.4」）。
+- 既定は承認あり（画面を常駐させ、定期実行の修正・削除をすべて承認待ちにする）である。設定で承認なしに切り替えると、画面のサーバーを登録せず、承認が要るものだけを会話で承認する（「1.2」）。
 
 `install.sh` で入れると、次の5つがそろう。
 
@@ -27,7 +28,7 @@ Claude Code の決まり（スキル・メモリ・CLAUDE.md）を直す変更�
 | スキルの欄 | 同じ画面の上のトグルで「スキル（N 件）」（`/skills`）に切り替え、スキルの一覧と、各スキルの Markdown を整形した表示を読む。見るだけで、編集・削除はできない（POST は 405 を返す）。置き場所は環境変数 `CLAUDE_SKILLS_DIR`、無ければ `${CLAUDE_CONFIG_DIR:-~/.claude}/skills` とし、直下のディレクトリ（シンボリックリンクを含む）のうち `SKILL.md` を持つものを数える。`.` で始まるもの・`synced`・環境変数 `CLAUDE_SKILLS_EXCLUDE`（カンマ区切り）に書いた名前は数えない。スキルが1件も無ければ、トグルにスキルの項目は出ない。レポートとスキルの項目がどちらも無ければ、トグルそのものを出さない |
 | 通知 | 承認待ちが増えたら macOS の通知を出す |
 | 承認の決まり | Skill `change-review`。案の書式・承認の判定・反映の手順を定める |
-| 週1回の見直し（任意） | Skill `memory-audit`（メモリ）・`skill-audit`（スキル）・`feedback-mining`（会話の履歴からの決まりの案）。週1回 `claude -p` を動かす。追加はその場で反映し、修正と削除は承認待ちにする。`install.sh` が登録するかを聞く（「4.1 週1回の見直し」） |
+| 週1回の見直し（任意） | Skill `memory-audit`（メモリ）・`skill-audit`（スキル）・`feedback-mining`（会話の履歴からの決まりの案）。週1回 `claude -p` を動かす。変更ごとに承認が要るかを判断し、要らないものはその場で反映して結果に載せ、要るものは承認待ちにする。`install.sh` が登録するかを聞く（「4.1 週1回の見直し」） |
 | 結果の一覧 | Skill `report-inbox`。定期実行の結果の未読と失敗を、会話の開始時に1行で出す（SessionStart フック） |
 | 見回り | Skill `repo-patrol`（手元のリポジトリの未コミット・未 push）と `secret-patrol`（秘密情報と個人情報の置き忘れ）。会話の開始時に SessionStart フックが裏で動かす。見回る範囲は `install.sh` が聞く（「4.2 見回りの範囲」） |
 
@@ -38,16 +39,39 @@ Claude Code の決まり（スキル・メモリ・CLAUDE.md）を直す変更�
 | CLAUDE.md の変更（追加を含む） | 承認待ち |
 | 会話の履歴から作った決まりの案 | 承認待ち |
 | Claude Code の安全チェックに止められた、自身の決まりの変更 | 承認待ち |
-| 定期実行が自分で見つけたスキル・メモリの修正と削除 | 承認待ち。定期実行のスクリプトが案を作る |
-| 定期実行が自分で見つけたスキル・メモリの追加（既存の行を変えない・消さない変更） | 承認なしで反映し、記録だけ残す |
+| 定期実行が自分で見つけたスキル・メモリの変更のうち、承認が要ると判断したもの（安全のための規則をゆるめる変更、訂正リストで同じ種類が2回訂正された変更、移し先への書き足しを伴う変更、判断に迷うものなど） | 承認待ち。定期実行のスクリプトが案を作る |
+| 定期実行が自分で見つけたスキル・メモリの変更のうち、承認が要らないと判断したもの（追加・修正・削除・統合） | 承認あり（`screen`。既定）では追加だけを反映し、修正・削除は承認待ち。承認なし（`auto`）では反映する。反映した変更は直す前と直した後の版を変更の台帳に残し、ID を振って結果に載せる。「<ID> を戻して」で戻せる。誤りと分かったら会話の中で直し、訂正リスト（`~/claude-reports/proposals/corrections.md`）に「正しくは○○」を残す |
 | 会話の中でのスキル・メモリの直し | 対象外 |
+
+判断の基準と訂正・戻し方の手順は、Skill `change-review` の「0.1」「8.」「9.」に書いてある。
+
+### 1.2 承認の進め方と安全装置
+
+承認の進め方は、共通の設定ファイル `~/.config/claude-review-inbox/jobs.conf` の `CLAUDE_REVIEW_APPROVAL_MODE` で選ぶ（環境変数が優先する）。何も書かなければ承認ありで動く。
+
+| 値 | 名前 | 定期実行の修正・削除 | 承認の手段 | 画面のサーバー |
+| --- | --- | --- | --- | --- |
+| `screen`（既定） | 承認あり | すべて承認待ち | 画面のボタンと会話 | `install.sh` が常駐させる |
+| `auto` | 承認なし | 承認が要るもの（「1.1」）だけ承認待ち | 会話だけ | `install.sh` が登録しない（登録済みなら外す） |
+
+承認なしに切り替えるときは、jobs.conf に `CLAUDE_REVIEW_APPROVAL_MODE=auto` の行を足して `./install.sh` を実行し直す。どちらでも、CLAUDE.md の変更・会話の履歴から作った決まりの案・安全チェックに止められた変更・スクリプトが判定する承認待ちは残り、会話の開始時に件数が出る。
+
+次の安全装置は、どちらの進め方でも働く。承認なしでは、人の承認の代わりにこれらで守る。
+
+| 安全装置 | 内容 |
+| --- | --- |
+| 南京錠 | 定期実行の `claude -p` に、安全のための規則のスキル（既定 `security-rules`・`commit-guard`）全体、フックと定期実行のスクリプト（各スキルの `scripts/`）、各設定ディレクトリの `CLAUDE.md`・`settings.json`・`settings.local.json`、変更の台帳の書き換えを、リンクの表記と実体のパスの両方で拒否する（`--disallowedTools`）。`--permission-mode default` を付け、settings.json の既定の許可の設定で編集が通らないようにする。一覧は jobs.conf の `SKILL_AUDIT_PROTECTED`・`CLAUDE_REVIEW_GUARDED_PATHS` で変えられる |
+| 変更の台帳 | 承認なしで反映した変更の直す前と直した後の版を、手元だけの git のリポジトリ（既定 `~/.local/state/claude-change-ledger`）に ID 付きでコミットする。`core/skills/change-review/scripts/revert.sh <ID>` で1コマンドで戻し、戻したこともコミットする |
+| 訂正リスト | 誤りと分かって直した変更を「正しくは○○」で残す。同じ種類が2回訂正されたら、以後その種類は承認待ちに回る |
+| 検問所 | `feedback-mining` には、会話の履歴から利用者本人の発言だけを取り出したファイルを渡す（ツールの結果・フックの出力・スラッシュコマンドの展開・貼り付けた文章の中身を除く）。元の jsonl の読み取りは拒否する |
+| 見張り番 | 会話の開始時の1行に「前回の会話以降に自動で反映した変更 N件（戻すときは「<ID> を戻して」）」を出す |
 
 ## 2. 構成
 
 | パス | 内容 |
 | --- | --- |
 | `install.sh` | 入れる・外す。オプションは `--with-schedule`・`--no-schedule`・`--yes`・`--dry-run`・`--uninstall` |
-| `core/skills/change-review/` | 承認待ちの手順（`SKILL.md`）と `scripts/`（承認済みの判定 `approved.py`、件数の集計 `count.sh`、案の作成 `new-proposal.sh`・`diff-label.sh`、共通部品 `proposal_lib.py`、画面の「承認して反映」の処理 `apply_lib.py`） |
+| `core/skills/change-review/` | 承認待ちの手順（`SKILL.md`）と `scripts/`（承認済みの判定 `approved.py`、件数の集計 `count.sh`、案の作成 `new-proposal.sh`・`diff-label.sh`、共通部品 `proposal_lib.py`、画面の「承認して反映」の処理 `apply_lib.py`、変更の台帳 `ledger.sh` と戻し `revert.sh`、南京錠と承認の進め方を求める `link-scopes.sh`） |
 | `core/server/inbox_server.py` | 画面・ボタンの処理・置き場所の見張りと通知 |
 | `core/server/markdown_lite.py` | スキルの欄の Markdown の整形。標準ライブラリだけで動き、生の HTML はすべてエスケープする |
 | `core/skills/memory-audit/`・`feedback-mining/`・`skill-audit/` | 週1回の見直しの3つ。各スキルが `launchd/<ジョブ名>.plist.template` を持つ |
@@ -86,8 +110,8 @@ flowchart LR
 
 1. 画面のボタンが押されるたびに、サーバーが判断の台帳 `~/.local/state/claude-review-inbox/decisions.jsonl` に1行追記する。項目は `id`・`to`・`note`・`sha256`（frontmatter を除いた本文の SHA-256）・`at` である。「承認して反映」で反映できたときは、`"to": "approved"` の行に続けて `"to": "applied"` の行を足す。
 2. 反映の手順では、ファイルの `status: approved`、台帳の最新の行が `approved`、台帳の `sha256` と今の本文の SHA-256 の一致、の3つがそろった案だけを承認済みとする。判定は `core/skills/change-review/scripts/approved.py` が出す。
-3. 定期実行の `claude -p` には、台帳と承認待ちの置き場所への書き込みを許可しない（`core/skills/*/scripts/run.sh` と `run-audit.sh` の `--disallowedTools`）。
-4. 利用者が会話で直接「01 を承認」と言った場合は、台帳が無くても承認として扱う。
+3. 定期実行の `claude -p` には、台帳と承認待ちの置き場所への書き込みを許可しない（`core/skills/*/scripts/run.sh` と `run-audit.sh` の `--disallowedTools`）。南京錠（「1.2」）の規則も同じ `--disallowedTools` に入る。
+4. 利用者が会話で直接「01 を承認」と言った場合は、台帳が無くても承認として扱う。承認なし（`auto`）では画面を使わないため、承認はこの形だけになる。
 
 ### 3.2 画面の守り
 
@@ -113,7 +137,8 @@ flowchart LR
 
 画面の「承認して反映」は、承認の記録に続けて、サーバー（`core/skills/change-review/scripts/apply_lib.py`）が案の差分を対象のファイルへ当てる。手順の詳細は Skill `change-review` の「4.1」が定める。
 
-- 次のどれかに当たる案は自動で反映せず、承認済みのまま残す。画面に「Claude による反映が必要です（理由）」と出す。スキルの削除を含む案、見出しに「（移し先の確認が必要）」がある案、メモに「移さない」がある案、差分が無い・崩れている案、`targets` に無いファイルを差分が含む案、書き込む先がホームの外か置き場所の中にある案。
+- 承認は案の差分の全体への承認である。移し先への追記・索引の行の削除・スキルの全ファイルの削除も差分のとおり反映し、スキルの削除では空になったフォルダも消す。移さずに捨てたい記述があれば、承認せずに保留にしてメモに書く。
+- 次のどれかに当たる案だけは、改ざん対策として自動で反映せず、承認済みのまま残す。画面に「Claude による反映が必要です（理由）」と出す。差分が無い・崩れている案、`targets` に無いファイルを差分が含む案（`targets` のフォルダの中は認める）、書き込む先がホームの外か置き場所の中にある案、リンクを消す案。
 - 差分は一時的な複製へ `patch -F 0`（fuzz を許さない）で当ててから置き換える。行の位置のずれは、当てる場所が1か所に決まるときだけ許す。1つでも当たらなければ何も変えず、保留（`hold`）にしてメモに理由を書く。
 - 直す前の版は `~/claude-reports/proposals/.backup/<YYYY-MM-DD>/` に複製する。途中で失敗したら、置き換えたファイルを複製から戻して保留にする。
 - 同時に押されても二重に当てないよう、サーバーの中の排他と、台帳の置き場所の `apply.lock` で1件ずつ処理する。反映済みの案をもう一度押すと 409 を返す。
@@ -147,7 +172,7 @@ flowchart LR
 
    最初に必要なものを確かめ、足りないものは入れる前に1つずつ聞く（「4.0 必要なものの確認」）。
 
-4. ブラウザで `http://127.0.0.1:8010/` を開き、一覧が表示されることを確かめる。
+4. ブラウザで `http://127.0.0.1:8010/` を開き、一覧が表示されることを確かめる（承認ありのとき。承認なしでは画面を使わない）。
 
 `install.sh` は次を行う。何回実行しても結果は同じになる。
 
@@ -156,7 +181,7 @@ flowchart LR
 | 1 | 必要なものを確かめ、足りないものは聞いてから入れる | 「4.0 必要なものの確認」を参照する |
 | 2 | `terminal-notifier` があれば、試しの通知を1回出す | 失敗したら、アプリとして1回起動してからもう一度試す。それでも失敗したら許可の手順を表示して続ける（「5. 通知の許可」）。`--dry-run` では出さない |
 | 3 | `core/skills/*`（7件）を、スキル置き場へシンボリックリンクで置く。旧版が置いた `review-loop` のリンク（このリポジトリを指すもの）は消す（`.trash` へは移さない） | スキル置き場は、各設定ディレクトリ（`~/.claude` と、共通の設定ファイルで指定した2つ目以降。「4.3 環境ごとの設定」）の `skills`。リンクなら実体を解決し、同じ実体へ二重に置かない。リンクに書かれたパスがリポジトリ内のパスと一致すれば何もしない。一致しないが実体をたどるとこのリポジトリを指すリンク（リポジトリを移す前の旧位置を経由するリンクなど）は、その場で張り直す。それ以外で同じ名前のものが既にあれば `<スキル置き場>/.trash/<YYYYMMDD-HHMMSS>-<名前>` へ移してから置く |
-| 4 | `~/Library/LaunchAgents/<ラベル>.plist` を作り、`launchctl bootstrap gui/<UID>` で登録する | 登録済みなら `launchctl bootout` してから登録する。ラベルの既定は `com.<ユーザー名>.claude-review-inbox`（ユーザー名のドットはハイフンに置き換える） |
+| 4 | `~/Library/LaunchAgents/<ラベル>.plist` を作り、`launchctl bootstrap gui/<UID>` で登録する | 登録済みなら `launchctl bootout` してから登録する。ラベルの既定は `com.<ユーザー名>.claude-review-inbox`（ユーザー名のドットはハイフンに置き換える）。承認なし（jobs.conf の `CLAUDE_REVIEW_APPROVAL_MODE=auto`）では登録せず、登録済みなら `launchctl bootout` して plist を消す（「1.2」） |
 | 5 | 週1回の見直しを、聞いてから登録する | 「4.1 週1回の見直し」を参照する。旧版が登録した `review-loop` の定期実行は外す。登録した定期実行は `~/.local/state/claude-review-inbox/scheduled-jobs.tsv` に記録する |
 | 6 | 見回りの範囲を聞き、設定ファイルに書く | 「4.2 見回りの範囲」を参照する |
 | 7 | 各設定ディレクトリの `settings.json` の `hooks.SessionStart` に、`report-inbox` の `unread.sh`・`repo-patrol` の `run-if-due.sh`・`secret-patrol` の `session-trigger.sh` を足す | Python（標準ライブラリの `json`）で行う。同じ文字列か、`~` と環境変数を展開してリンクを解決した先が同じファイルのコマンドが既にあれば足さない。書き換える前に `settings.json.bak-<YYYYMMDD-HHMMSS>` を残す。旧版が足した `core/hooks/session-start.sh` は外す |
@@ -250,6 +275,10 @@ jobs.conf に書ける項目:
 | `SKILL_AUDIT_OWN_LINK_ROOTS` | 本リポジトリの `core/skills` | 実体がこの下にあるリンクを、`skill-audit` が自作のスキルとして扱う（コロン区切り） |
 | `SECRET_PATROL_SKILL_EXCLUDES` | なし | `secret-patrol` がスキルの置き場所で見回らない名前（空白区切り） |
 | `SECRET_PATROL_HOOK_PATTERN` | なし | `secret-patrol` が、秘密の検査の hook とみなすコマンドに含まれる文字列。無ければ確かめない |
+| `CLAUDE_REVIEW_APPROVAL_MODE` | `screen` | 承認の進め方（「1.2」）。`screen` は承認あり（画面を常駐させ、定期実行の修正・削除はすべて承認待ち）、`auto` は承認なし（画面を登録せず、承認が要るものだけを会話で承認する）。変えたら `./install.sh` を実行し直す |
+| `CLAUDE_CHANGE_LEDGER` | `~/.local/state/claude-change-ledger` | 変更の台帳の置き場所 |
+| `SKILL_AUDIT_PROTECTED` | `security-rules commit-guard` | 安全のための規則のスキル（空白区切り）。定期実行の書き換えを拒否し、`skill-audit` は修正・削除を常に承認待ちにする |
+| `CLAUDE_REVIEW_GUARDED_PATHS` | 各スキルの `scripts/`（`security-rules`・`memory-audit`・`report-inbox`・`repo-patrol`・`secret-patrol`・`skill-audit`・`feedback-mining`・`change-review`） | 定期実行の書き換えを拒否するフックと定期実行のスクリプト（コロン区切り。スキルの置き場所からの相対パスか絶対パス）。指定すると既定を置き換える |
 
 例（2つ目の設定ディレクトリを使い、別のアカウントで起動するラッパーを使う場合）:
 
@@ -330,6 +359,8 @@ git pull
 | 却下を取り消す | 「却下」のタブで「承認待ちに戻す」などを押す。否認リストからその行が消える |
 | JavaScript を使わずに判断する | カードのボタンはフォームの送信としても動く。送信後は案の画面（`/p/<名前>`）へ移る |
 | 承認した変更を反映する | 自動で反映できる案は「承認して反映」で反映済みになる。承認済みのまま残った案は、会話で「承認分を反映して」と言う。Claude が `approved.py` で判定し、差分の `-` 行が今のファイルと一致するものだけを反映する。一致しないものは `hold` にしてメモに理由を書く |
+| 承認なしで承認待ちを反映する | 会話の開始時に「承認待ち N件」が出たら、会話で「承認待ちを見せて」で中身を見て、「反映して」（全部）か「01 を承認」（番号）と言う |
+| 自動で反映した変更を戻す | 会話で「<ID> を戻して」と言う。Claude が `core/skills/change-review/scripts/revert.sh <ID>` で変更の台帳から戻し、訂正リストに「正しくは○○」を足す。手で戻すときも同じコマンドを使う |
 
 ## 10. テスト
 
@@ -341,12 +372,14 @@ core/tests/run.sh
 | --- | --- |
 | `core/tests/test_server.py` | 一覧（カードの理由・差分・メモ欄・ボタン、反映済みは読むだけ）・詳細・JSON の判断（各状態への遷移・否認リスト・台帳・誤った要求）・`Content-Type` が違う POST の 415・`Origin` と `Host` が違う JSON の POST の 403・`/static/app.js` の配信と CSP の見出し・各状態への遷移・否認リストへの追記と削除・台帳への追記・`Origin` と `Host` の拒否・パストラバーサルの拒否・初回の起動で通知しないこと・2回目以降は増えた分だけ通知すること・`terminal-notifier` が失敗したときに `osascript` へ切り替えること・通知の成否のログ・レポートの欄（トグルの有無と未読の件数、一覧の並びと数えないもの、既読の記録への追記と重複の防止、不正なパス・合言葉・`Origin` の拒否、本文のエスケープ）・スキルの欄（トグルの3項目と出し分け、一覧の対象と除外、行き先の無いリンク、相対パスのリンク、1件の表示とほかの `.md` へのリンク、404 の各場合、POST の 405） |
 | `core/tests/test_markdown_lite.py` | Markdown の整形（見出し・段落・入れ子の箇条書き・表・コードの囲み・引用・水平線・行内の要素、`<script>` と `javascript:` のリンクのエスケープ） |
-| `core/tests/test_apply.py` | 「承認して反映」: ふつうの差分が当たって `applied` になり台帳に `applied` の行が足されること・直す前の版の複製・二度押しと同時押しで二重に当たらないこと・一致しない差分と反映済みの内容で何も変えず `hold` になること・offset は1か所に決まるときだけ許すこと・ファイルの新規作成と削除・複数ファイルの途中の失敗と台帳への書き込みの失敗で全部戻ること・自動で反映しない案（移し先の確認が必要・「移さない」・削除の手段・差分なし・崩れた差分・`targets` 外・スキルの削除・フォルダ）が `approved` のまま残ること・ホームの外・`..`・外を指すリンク・置き場所の中への書き込みを拒むこと・ホームの中を指すリンクは許すこと・他の `Origin` と合言葉の不一致と `text/plain` の拒否・フォームの POST での結果表示・`127.0.0.1` だけで待ち受けること |
+| `core/tests/test_apply.py` | 「承認して反映」: ふつうの差分が当たって `applied` になり台帳に `applied` の行が足されること・直す前の版の複製・二度押しと同時押しで二重に当たらないこと・一致しない差分と反映済みの内容で何も変えず `hold` になること・offset は1か所に決まるときだけ許すこと・ファイルの新規作成と削除・複数ファイルの途中の失敗と台帳への書き込みの失敗で全部戻ること・移し先の確認の印・「移さない」のメモ・削除の手段の記載があっても差分の全体を反映すること・スキルの削除で全ファイルと空になったフォルダを消し、他のファイルが残るフォルダは残すこと・自動で反映しない案（差分なし・崩れた差分・`targets` 外・リンクのスキルの削除）が `approved` のまま残ること・ホームの外・`..`・外を指すリンク・置き場所の中への書き込みを拒むこと・ホームの中を指すリンクは許すこと・他の `Origin` と合言葉の不一致と `text/plain` の拒否・フォームの POST での結果表示・`127.0.0.1` だけで待ち受けること |
 | `core/tests/test_approved.py` | 承認済みの判定（台帳あり・なし・本文の書き換え・最新が approved でない）、件数の集計、案の作成 |
 | `core/tests/test_install.sh` | 一時の `HOME` と偽の `launchctl`・`brew`・`open`・`terminal-notifier` で、7件のリンク・3つのフック・jobs.conf の設定ディレクトリの一覧・2回実行・`--dry-run`・`--uninstall`・旧版の後始末・スキル置き場を経由したフックを二重に足さないこと・旧位置を経由したリンクの張り直しと外し方・試しの通知 |
 | `core/tests/test_install_schedule.sh` | 一時の `HOME` と偽の `launchctl` で、週1回の見直しの登録（非端末・聞かれて `n`／`y`・`--with-schedule`・`--no-schedule`・`claude` が無いとき・2回実行・既存のラベルの引き継ぎ）、旧版の後始末、`--uninstall`、見回りの範囲の問いと `patrol.conf`、`--dry-run` の表示。端末からの実行は疑似端末で模す |
 | `core/tests/test_install_prereq.sh` | 一時の `HOME` と偽の `xcode-select`・`/usr/bin/python3`・`brew`・Homebrew の公式の手順・`terminal-notifier`・`claude`・`launchctl` で、必要なものの確認（全部そろっているとき聞かない、コマンドラインツールが無いとき `y`／`N`／非端末／`--yes`／`--dry-run`、Python が古いとき、Homebrew と `terminal-notifier` が無いとき `y`／`N`、`claude` が無いとき週1回の見直しを登録しない、plist の `PATH`）、`jq` を使わないフックの追加と削除 |
 | `core/tests/test_link_scopes.sh` | 一時の `HOME` に実体が別のフォルダにあるリンクのスキルを置き、3つの定期実行の `--dry-run` の出力に実体の `Read` が1回ずつ入ること、実体の無いリンクで落ちないこと、リンクの先の実体の `Edit` を拒否すること |
+| `core/tests/test_guard_rules.sh` | 南京錠: 3つの定期実行の `--dry-run` の `--disallowedTools` に、安全のための規則のスキル全体・フックと定期実行のスクリプト・`CLAUDE.md`・`settings.json`・`settings.local.json`・変更の台帳が、リンクの表記と実体のパスの両方で入ること、許可の側に入らないこと、`--permission-mode default` が付くこと、jobs.conf で一覧を変えられること |
+| `core/tests/test_ledger.sh` | 変更の台帳: 記録（修正・追加・スキルの削除）とコミットのメッセージ、正しくない ID と相対パスの拒否、`revert.sh` で戻すこと・戻す前の内容を残すこと・2回目は戻さないこと、`unread.sh` の「前回の会話以降に自動で反映した変更」の1行（2回目は出さない、4件以上は3件だけ並べる、戻したコミットは数えない） |
 | `core/tests/test_destinations.sh` | 修正と削除の案に付ける、消える記述の行き先 |
 | `core/skills/*/scripts/test.sh` | 各スキル。起動するコマンドは常に `CLAUDE_LAUNCHER` で偽物に差し替え、本物の `claude` を起動しない。jobs.conf と環境変数の優先順位、設定ディレクトリが2つある場合、見回りの範囲の設定ファイルが無い・ある場合を含む |
 

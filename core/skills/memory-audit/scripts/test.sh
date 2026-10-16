@@ -21,6 +21,10 @@ export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
 # 承認待ちの案を作るスクリプトは、リポジトリの core のものを使う。
 CR_REAL="$(cd "$SCRIPT_DIR/../../change-review/scripts" && pwd -P)"
 export CHANGE_REVIEW_SCRIPTS="$CR_REAL"
+# 承認なし（auto）の動きを既定として検査する。承認あり（screen）は末尾で別に確かめる。変更の台帳は一時の場所に置く。
+export CLAUDE_REVIEW_APPROVAL_MODE=auto
+export CLAUDE_CHANGE_LEDGER="$WORK/change-ledger"
+unset CLAUDE_REVIEW_GUARDED_PATHS SKILL_AUDIT_PROTECTED
 PDIR="$CLAUDE_REPORTS_ROOT/proposals"
 LEDGER="$HOME/.local/state/claude-review-inbox"
 STATE="$CLAUDE_REPORTS_STATE/memory-audit"
@@ -124,6 +128,7 @@ echo e1 >"$M_C/e.md"
 HOOK_MAIN='mkdir -p "$STAGE$S_A" "$STAGE$S_C/sub" "$STAGE$HOME/outside" "$STAGE$M_A" &&
 printf "a1\na2\n" >"$STAGE$S_A/a.md" &&
 printf "%s\t%s\n" "$M_A/d.md" "e.md と重複" "$HOME/outside/o.md" "範囲外" "$M_A/nosuch.md" "無い" "$M_A/../proj-a/memory/l.md" "相対" >"$STAGE/deletions.tsv" &&
+printf "%s\t%s\n" "$M_C/e.md" "判断に迷う" "$M_A/d.md" "統合先の確認が要る" >"$STAGE/needs-approval.tsv" &&
 echo e2 >"$STAGE$S_C/e.md" &&
 echo n1 >"$STAGE$S_A/new.md" &&
 echo t2 >"$STAGE$S_A/t.txt" &&
@@ -177,10 +182,12 @@ for item in "$HOME/outside/o.md\`: 削除の候補だが" "$M_A/nosuch.md\`: 削
   "$stage$M_A/d.md\`: 対象のメモリのディレクトリの直下ではない"; do
   check "書き戻さなかったファイルに理由付きで載る: ${item#$WORK/}" 'printf "%s" "$skipped" | grep -Fq -- "$item"'
 done
-check "deletions.tsv は書き戻しの対象として載せない" '! printf "%s" "$skipped" | grep -Fq "deletions.tsv"'
-summary="$(awk '/^## 自動で反映した追加と承認待ち/{f=1;next} /^## /{f=0} f' "$rep")"
-check "レポートに件数と番号を書く" 'printf "%s" "$summary" | grep -Fq "自動で反映した追加 1件 / 承認待ちにした 2件（$day-01、$day-02）"'
-check "レポートに反映した追加と承認待ちの一覧を書く" 'printf "%s" "$summary" | grep -Fq -- "- \`$M_A/a.md\`" && printf "%s" "$summary" | grep -Fq "\`$M_C/e.md\`（修正）" && printf "%s" "$summary" | grep -Fq "\`$M_A/d.md\`（削除）"'
+check "deletions.tsv と needs-approval.tsv は書き戻しの対象として載せない" '! printf "%s" "$skipped" | grep -Fq "deletions.tsv" && ! printf "%s" "$skipped" | grep -Fq "needs-approval.tsv"'
+check "承認待ちの理由に精査の判断を載せる" 'grep -Fq "精査が承認が要ると判断した（判断に迷う）" "$p_edit" && grep -Fq "精査が承認が要ると判断した（統合先の確認が要る）" "$p_del"'
+summary="$(awk '/^## 承認なしで反映した変更と承認待ち/{f=1;next} /^## /{f=0} f' "$rep")"
+check "レポートに件数と番号を書く" 'printf "%s" "$summary" | grep -Fq "承認なしで反映した変更 1件 / 承認待ちにした 2件（$day-01、$day-02）"'
+check "レポートに反映した変更（ID・種類・直す前の版）と承認待ちの一覧を書く" 'printf "%s" "$summary" | grep -Eq -- "^- memory-audit-${stage##*/}-01: \`$M_A/a.md\`（追加。種類 \`memory-audit/追加/proj-a/a.md\`。直す前の版 \`$snap$M_A/a.md\`）$" && printf "%s" "$summary" | grep -Fq "\`$M_C/e.md\`（修正）" && printf "%s" "$summary" | grep -Fq "\`$M_A/d.md\`（削除）"'
+check "レポートに訂正の手順と訂正リストの場所を書く" 'printf "%s" "$summary" | grep -Fq "訂正リスト（$PDIR/corrections.md）"'
 check "書き戻したファイルは載らない" '! printf "%s" "$skipped" | grep -Fq "$M_A/a.md" && ! printf "%s" "$skipped" | grep -Fq "$M_C/e.md"'
 check "末尾に変更の差分がある" 'grep -Fxq "## 変更の差分" "$rep" && grep -Fxq "+a2" "$rep" && ! grep -Fxq "+e2" "$rep"'
 check "差分の節は書き戻しの節より後" '[ "$(grep -n "^## 変更の差分" "$rep" | cut -d: -f1)" -gt "$(grep -n "^## 書き戻さなかったファイル" "$rep" | cut -d: -f1)" ]'
@@ -209,13 +216,25 @@ check "レポートが作られなければ見出しを補う" 'grep -Fq "レポ
 
 echo "== change-review が見つからなければ、修正を書き戻さず承認待ちも作らない"
 sleep 1
-# core/skills の中では隣に change-review があるため、隣に何も無い場所へ複製した scripts で試す。
-mkdir -p "$WORK/isolated/memory-audit" && cp -Rp "$SCRIPT_DIR" "$WORK/isolated/memory-audit/scripts"
+# core/skills の中では隣に change-review があるため、隣に書き換えを拒否する規則の部品（link-scopes.sh）だけを置いた場所へ
+# 複製した scripts で試す。
+mkdir -p "$WORK/isolated/memory-audit" "$WORK/isolated/change-review/scripts" && cp -Rp "$SCRIPT_DIR" "$WORK/isolated/memory-audit/scripts"
+cp -p "$CR_REAL/link-scopes.sh" "$WORK/isolated/change-review/scripts/"
 CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" FAKE_HOOK='mkdir -p "$STAGE$S_C" && echo e3 >"$STAGE$S_C/e.md"' "$WORK/isolated/memory-audit/scripts/run.sh"
 rep5="$(ls -t "$RDIR"/*.md | head -1)"
 check "書き戻さない" '[ "$(cat "$M_C/e.md")" = "e1" ]'
 check "理由を書く" 'grep -Fq "$M_C/e.md\`: 既存の行を変える修正だが、Skill change-review が見つからず" "$rep5"'
 check "承認待ちは増えない" '[ "$(ls "$PDIR" | grep -vc rejections)" = "2" ]'
+
+echo "== 書き換えを拒否する規則の部品（link-scopes.sh）が無ければ起動しない"
+sleep 1
+mkdir -p "$WORK/bare/memory-audit" && cp -Rp "$SCRIPT_DIR" "$WORK/bare/memory-audit/scripts"
+rm -f "$FAKE_ARGS"
+CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" "$WORK/bare/memory-audit/scripts/run.sh"
+rc=$?
+check "終了コード1（rc=${rc}）" '[ "$rc" -eq 1 ]'
+check "claude を起動しない" '[ ! -f "$FAKE_ARGS" ]'
+check "ログに理由が書かれる" 'grep -q "link-scopes.sh を読み込めません" "$(ls -1t "$STATE/logs/"*.log | head -1)"'
 
 echo "== 複製に失敗したら起動しない"
 sleep 1
@@ -309,6 +328,75 @@ check "移し先がそろっていれば確認の印を付けない" 'grep -q "^
 check "移し先へは自動で書き足さない" '[ "$(cat "$HOME/.claude/CLAUDE.md")" = "# 規則${NL}${NL}- 既存" ]'
 check "削除の候補のファイルは消さない" '[ -f "$M_A/g.md" ]'
 check "移し先の候補が無ければ見出しに確認の印を付ける" '[ -f "$p_h" ] && grep -q "^# メモリ proj-a/h.md の修正（memory-audit の精査）（移し先の確認が必要）$" "$p_h" && grep -Fq "No 1: 移し先の候補が無い" "$p_h" && grep -Fxq "status: pending" "$p_h"'
+
+echo "== 承認が要らない修正と削除は反映し、ID と直す前の版を載せる"
+printf 'p1\np2\n' >"$M_A/p.md"
+printf 'q1\n' >"$M_A/q.md"
+printf 'r1 permissions.deny で止める\nr2\n' >"$M_A/r.md"
+printf 's1\n' >"$M_A/s.md"
+printf -- '- [A](a.md) — a\n- [Q](q.md) — q\n' >"$M_A/MEMORY.md"
+# s.md の修正は、同じ種類が2回訂正されているため承認待ちに回る。
+bash "$CR_REAL/corrections.sh" add --id memory-audit-2000-01-01-000000-01 --kind memory-audit/修正/proj-a/s.md --target "$M_A/s.md" --correct "正しくは s1 のまま残す" >/dev/null
+bash "$CR_REAL/corrections.sh" add --id memory-audit-2000-01-08-000000-01 --kind memory-audit/修正/proj-a/s.md --target "$M_A/s.md" --correct "正しくは s1 を消さない" >/dev/null
+n_before="$(ls "$PDIR" | grep -vc -e rejections -e corrections)"
+HOOK_AUTO='mkdir -p "$STAGE$S_A" &&
+printf "p1 直した\np2\n" >"$STAGE$S_A/p.md" &&
+printf "r2\n" >"$STAGE$S_A/r.md" &&
+printf "s2\n" >"$STAGE$S_A/s.md" &&
+printf "%s\t%s\n" "$M_A/q.md" "p.md へ統合済み" >"$STAGE/deletions.tsv"'
+sleep 1
+FAKE_HOOK="$HOOK_AUTO" "$SCRIPT_DIR/run.sh"
+rc=$?
+rep6="$(ls -t "$RDIR"/*.md | head -1)"
+snap6="$(ls -d "$RDIR/.snapshots/"*/ | LC_ALL=C sort | tail -1)"; snap6="${snap6%/}"
+check "終了コード0" '[ "$rc" -eq 0 ]'
+check "依頼文に訂正リストと needs-approval.tsv の書き方を含む" 'grep -Fq "訂正リストは $PDIR/corrections.md にある。" "$FAKE_ARGS" && grep -Fq "/needs-approval.tsv に「元の絶対パス<TAB>理由」の形で1行1件書く" "$FAKE_ARGS"'
+check "承認の要らない修正は書き戻す" '[ "$(cat "$M_A/p.md")" = "p1 直した${NL}p2" ]'
+check "承認の要らない削除はファイルを消す" '[ ! -e "$M_A/q.md" ]'
+check "削除したメモリを指す索引の行も消す" '[ "$(cat "$M_A/MEMORY.md")" = "- [A](a.md) — a" ]'
+check "直す前の版は .snapshots に残る" '[ "$(cat "$snap6$M_A/q.md")" = "q1" ] && [ "$(cat "$snap6$M_A/p.md")" = "p1${NL}p2" ]'
+check "安全のための規則の記述を消す修正は承認待ち" '[ "$(cat "$M_A/r.md")" = "r1 permissions.deny で止める${NL}r2" ]'
+check "2回訂正された種類の修正は承認待ち" '[ "$(cat "$M_A/s.md")" = "s1" ]'
+new_props="$(ls -t "$PDIR"/*.md | grep -v -e rejections -e corrections | head -n $(( $(ls "$PDIR" | grep -vc -e rejections -e corrections) - n_before )))"
+check "承認待ちは2件（r.md と s.md）" '[ "$(printf "%s\n" "$new_props" | grep -c .)" = "2" ]'
+check "承認待ちの理由に判定の根拠を書く" 'grep -lq "安全のための規則" $new_props && grep -Fq "memory-audit/修正/proj-a/s.md）が訂正リストで 2 回訂正されている" $(grep -l "^  - $M_A/s.md\$" $new_props)'
+auto="$(awk '/^### 承認なしで反映した変更/{f=1;next} /^#/{f=0} f' "$rep6")"
+check "レポートに修正と削除を ID 付きで載せる" 'printf "%s" "$auto" | grep -Fq "\`$M_A/p.md\`（修正。種類 \`memory-audit/修正/proj-a/p.md\`。直す前の版 \`$snap6$M_A/p.md\`）" && printf "%s" "$auto" | grep -Fq "\`$M_A/q.md\`（削除。種類 \`memory-audit/削除/proj-a/q.md\`。直す前の版 \`$snap6$M_A/q.md\`）" && printf "%s" "$auto" | grep -Fq "索引 \`$M_A/MEMORY.md\` の、このメモリを指す行も消した"'
+check "ID は日時と連番" '[ "$(printf "%s\n" "$auto" | grep -c "^- memory-audit-${snap6##*/}-0[12]: ")" = "2" ]'
+check "レポートの件数" 'grep -Fq "承認なしで反映した変更 2件 / 承認待ちにした 2件" "$rep6"'
+
+echo "== 変更の台帳に記録し、ID を渡して戻せる"
+qid="$(printf '%s\n' "$auto" | sed -n "s|^- \(memory-audit-[^:]*\): \`$M_A/q.md\`.*|\1|p")"
+pid="$(printf '%s\n' "$auto" | sed -n "s|^- \(memory-audit-[^:]*\): \`$M_A/p.md\`.*|\1|p")"
+check "台帳は git のリポジトリで、ID ごとにコミットがある" '[ -d "$CLAUDE_CHANGE_LEDGER/.git" ] && git -C "$CLAUDE_CHANGE_LEDGER" log --format=%s | grep -q "^record: $qid memory-audit/削除/proj-a/q.md " && git -C "$CLAUDE_CHANGE_LEDGER" log --format=%s | grep -q "^record: $pid memory-audit/修正/proj-a/p.md "'
+check "台帳に直す前と直した後の版を写す" '[ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$pid/1/before")" = "p1${NL}p2" ] && [ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$pid/1/after")" = "p1 直した${NL}p2" ] && [ ! -e "$CLAUDE_CHANGE_LEDGER/entries/$qid/1/after" ]'
+check "削除と索引の行の削除は同じ ID で記録する" '[ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$qid/2/target")" = "$M_A/MEMORY.md" ]'
+check "レポートに戻し方（revert.sh）を書く" 'grep -Fq "scripts/revert.sh に ID を渡す（変更の台帳 $CLAUDE_CHANGE_LEDGER から" "$rep6"'
+out="$(bash "$CR_REAL/revert.sh" "$qid" 2>&1)"; rc=$?
+check "削除を戻す: ファイルと索引の行が戻る" '[ "$rc" -eq 0 ] && [ "$(cat "$M_A/q.md")" = "q1" ] && [ "$(cat "$M_A/MEMORY.md")" = "- [A](a.md) — a${NL}- [Q](q.md) — q" ]'
+check "戻した後に訂正リストへの追記を促す" 'printf "%s" "$out" | grep -Fq "corrections.sh add --id $qid --kind memory-audit/削除/proj-a/q.md"'
+check "戻したことを台帳にコミットする" '[ "$(git -C "$CLAUDE_CHANGE_LEDGER" log -1 --format=%s)" = "revert: $qid" ]'
+bash "$CR_REAL/revert.sh" "$qid" >/dev/null 2>&1; rc=$?
+check "同じ ID を2回は戻さない" '[ "$rc" -ne 0 ]'
+printf 'p1 さらに直した\np2\n' >"$M_A/p.md"
+bash "$CR_REAL/revert.sh" "$pid" >/dev/null 2>&1; rc=$?
+check "反映の後に変わっていれば戻さない" '[ "$rc" -eq 1 ] && [ "$(cat "$M_A/p.md")" = "p1 さらに直した${NL}p2" ]'
+bash "$CR_REAL/revert.sh" "$pid" --force >/dev/null 2>&1; rc=$?
+check "--force なら戻す" '[ "$rc" -eq 0 ] && [ "$(cat "$M_A/p.md")" = "p1${NL}p2" ] && [ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$pid/1/removed")" = "p1 さらに直した${NL}p2" ]'
+
+echo "== 承認あり（screen）では修正と削除をすべて承認待ちにする"
+printf 'u1\n' >"$M_A/u.md"
+n_before="$(ls "$PDIR" | grep -vc -e rejections -e corrections)"
+sleep 1
+CLAUDE_REVIEW_APPROVAL_MODE=screen FAKE_HOOK='mkdir -p "$STAGE$S_A" && printf "u2\n" >"$STAGE$S_A/u.md" && printf "a1\na2\na3\n" >"$STAGE$S_A/a.md"' "$SCRIPT_DIR/run.sh"
+check "修正は書き戻さない" '[ "$(cat "$M_A/u.md")" = "u1" ]'
+check "追加だけの変更は書き戻す" '[ "$(cat "$M_A/a.md")" = "a1${NL}a2${NL}a3" ]'
+new_props="$(ls -t "$PDIR"/*.md | grep -v -e rejections -e corrections | head -n $(( $(ls "$PDIR" | grep -vc -e rejections -e corrections) - n_before )))"
+check "承認待ちの理由に承認ありの設定を書く" '[ "$(printf "%s\n" "$new_props" | grep -c .)" = "1" ] && grep -Fq "承認ありの設定（CLAUDE_REVIEW_APPROVAL_MODE=screen）" $new_props'
+printf 'CLAUDE_REVIEW_APPROVAL_MODE=auto\n' >"$CLAUDE_REVIEW_JOBS_CONF"
+check "jobs.conf の承認の進め方を読む" '[ "$(env -u CLAUDE_REVIEW_APPROVAL_MODE bash -c ". \"$CR_REAL/link-scopes.sh\"; approval_mode")" = "auto" ]'
+rm -f "$CLAUDE_REVIEW_JOBS_CONF"
+check "既定は承認あり（screen）" '[ "$(env -u CLAUDE_REVIEW_APPROVAL_MODE bash -c ". \"$CR_REAL/link-scopes.sh\"; approval_mode")" = "screen" ]'
 
 echo "== plist のひな形"
 PL="$WORK/memory-audit.plist"
