@@ -31,6 +31,7 @@ Claude Code の決まり（スキル・メモリ・CLAUDE.md）を直す変更�
 | 週1回の見直し（任意） | Skill `memory-audit`（メモリ）・`skill-audit`（スキル）・`feedback-mining`（会話の履歴からの決まりの案）。週1回 `claude -p` を動かす。変更ごとに承認が要るかを判断し、要らないものはその場で反映して結果に載せ、要るものは承認待ちにする。`install.sh` が登録するかを聞く（「4.1 週1回の見直し」） |
 | 結果の一覧 | Skill `report-inbox`。定期実行の結果の未読と失敗を、会話の開始時に1行で出す（SessionStart フック） |
 | 見回り | Skill `repo-patrol`（手元のリポジトリの未コミット・未 push）と `secret-patrol`（秘密情報と個人情報の置き忘れ）。会話の開始時に SessionStart フックが裏で動かす。見回る範囲は `install.sh` が聞く（「4.2 見回りの範囲」） |
+| 外部スキルの新しい版 | Skill `skill-updates`。その日の最初のセッションの開始時に、`~/skills-lock.json` に載っている外部スキルの上流を GitHub API で確かめ、新しい版があればそのセッションの冒頭で知らせて今対応するかを問う。自動では更新しない |
 
 ### 1.1 承認制にする範囲
 
@@ -77,6 +78,7 @@ Claude Code の決まり（スキル・メモリ・CLAUDE.md）を直す変更�
 | `core/skills/memory-audit/`・`feedback-mining/`・`skill-audit/` | 週1回の見直しの3つ。各スキルが `launchd/<ジョブ名>.plist.template` を持つ |
 | `core/skills/report-inbox/` | 定期実行の結果の一覧と既読の管理。`scripts/unread.sh` を SessionStart フックに登録する |
 | `core/skills/repo-patrol/`・`secret-patrol/` | 見回りの2つ。`scripts/run-if-due.sh`・`scripts/session-trigger.sh` を SessionStart フックに登録する |
+| `core/skills/skill-updates/` | 外部から入れたスキルの上流の新しい版の確認。`scripts/run-if-due.sh` を SessionStart フックに登録する |
 | `core/launchd/claude-review-inbox.plist.template` | サーバーの plist のひな形。`install.sh` がパスとラベルを埋める |
 | `core/tests/` | テスト。`core/tests/run.sh` で全部動く |
 | `LICENSE` | MIT License |
@@ -180,11 +182,11 @@ flowchart LR
 | --- | --- | --- |
 | 1 | 必要なものを確かめ、足りないものは聞いてから入れる | 「4.0 必要なものの確認」を参照する |
 | 2 | `terminal-notifier` があれば、試しの通知を1回出す | 失敗したら、アプリとして1回起動してからもう一度試す。それでも失敗したら許可の手順を表示して続ける（「5. 通知の許可」）。`--dry-run` では出さない |
-| 3 | `core/skills/*`（7件）を、スキル置き場へシンボリックリンクで置く。旧版が置いた `review-loop` のリンク（このリポジトリを指すもの）は消す（`.trash` へは移さない） | スキル置き場は、各設定ディレクトリ（`~/.claude` と、共通の設定ファイルで指定した2つ目以降。「4.3 環境ごとの設定」）の `skills`。リンクなら実体を解決し、同じ実体へ二重に置かない。リンクに書かれたパスがリポジトリ内のパスと一致すれば何もしない。一致しないが実体をたどるとこのリポジトリを指すリンク（リポジトリを移す前の旧位置を経由するリンクなど）は、その場で張り直す。それ以外で同じ名前のものが既にあれば `<スキル置き場>/.trash/<YYYYMMDD-HHMMSS>-<名前>` へ移してから置く |
+| 3 | `core/skills/*`（8件）を、スキル置き場へシンボリックリンクで置く。旧版が置いた `review-loop` のリンク（このリポジトリを指すもの）は消す（`.trash` へは移さない） | スキル置き場は、各設定ディレクトリ（`~/.claude` と、共通の設定ファイルで指定した2つ目以降。「4.3 環境ごとの設定」）の `skills`。リンクなら実体を解決し、同じ実体へ二重に置かない。リンクに書かれたパスがリポジトリ内のパスと一致すれば何もしない。一致しないが実体をたどるとこのリポジトリを指すリンク（リポジトリを移す前の旧位置を経由するリンクなど）は、その場で張り直す。それ以外で同じ名前のものが既にあれば `<スキル置き場>/.trash/<YYYYMMDD-HHMMSS>-<名前>` へ移してから置く |
 | 4 | `~/Library/LaunchAgents/<ラベル>.plist` を作り、`launchctl bootstrap gui/<UID>` で登録する | 登録済みなら `launchctl bootout` してから登録する。ラベルの既定は `com.<ユーザー名>.claude-review-inbox`（ユーザー名のドットはハイフンに置き換える）。承認なし（jobs.conf の `CLAUDE_REVIEW_APPROVAL_MODE=auto`）では登録せず、登録済みなら `launchctl bootout` して plist を消す（「1.2」） |
 | 5 | 週1回の見直しを、聞いてから登録する | 「4.1 週1回の見直し」を参照する。旧版が登録した `review-loop` の定期実行は外す。登録した定期実行は `~/.local/state/claude-review-inbox/scheduled-jobs.tsv` に記録する |
 | 6 | 見回りの範囲を聞き、設定ファイルに書く | 「4.2 見回りの範囲」を参照する |
-| 7 | 各設定ディレクトリの `settings.json` の `hooks.SessionStart` に、`report-inbox` の `unread.sh`・`repo-patrol` の `run-if-due.sh`・`secret-patrol` の `session-trigger.sh` を足す | Python（標準ライブラリの `json`）で行う。同じ文字列か、`~` と環境変数を展開してリンクを解決した先が同じファイルのコマンドが既にあれば足さない。書き換える前に `settings.json.bak-<YYYYMMDD-HHMMSS>` を残す。旧版が足した `core/hooks/session-start.sh` は外す |
+| 7 | 各設定ディレクトリの `settings.json` の `hooks.SessionStart` に、`report-inbox` の `unread.sh`・`repo-patrol` の `run-if-due.sh`・`secret-patrol` の `session-trigger.sh`・`skill-updates` の `run-if-due.sh` を足す | Python（標準ライブラリの `json`）で行う。同じ文字列か、`~` と環境変数を展開してリンクを解決した先が同じファイルのコマンドが既にあれば足さない。書き換える前に `settings.json.bak-<YYYYMMDD-HHMMSS>` を残す。旧版が足した `core/hooks/session-start.sh` は外す |
 | 8 | `~/claude-reports/proposals/` と `~/.local/state/claude-review-inbox/` を作る | |
 
 設定は環境変数で変えられる。
@@ -278,7 +280,7 @@ jobs.conf に書ける項目:
 | `CLAUDE_REVIEW_APPROVAL_MODE` | `screen` | 承認の進め方（「1.2」）。`screen` は承認あり（画面を常駐させ、定期実行の修正・削除はすべて承認待ち）、`auto` は承認なし（画面を登録せず、承認が要るものだけを会話で承認する）。変えたら `./install.sh` を実行し直す |
 | `CLAUDE_CHANGE_LEDGER` | `~/.local/state/claude-change-ledger` | 変更の台帳の置き場所 |
 | `SKILL_AUDIT_PROTECTED` | `security-rules commit-guard` | 安全のための規則のスキル（空白区切り）。定期実行の書き換えを拒否し、`skill-audit` は修正・削除を常に承認待ちにする |
-| `CLAUDE_REVIEW_GUARDED_PATHS` | 各スキルの `scripts/`（`security-rules`・`memory-audit`・`report-inbox`・`repo-patrol`・`secret-patrol`・`skill-audit`・`feedback-mining`・`change-review`） | 定期実行の書き換えを拒否するフックと定期実行のスクリプト（コロン区切り。スキルの置き場所からの相対パスか絶対パス）。指定すると既定を置き換える |
+| `CLAUDE_REVIEW_GUARDED_PATHS` | 各スキルの `scripts/`（`security-rules`・`memory-audit`・`report-inbox`・`repo-patrol`・`secret-patrol`・`skill-audit`・`feedback-mining`・`change-review`・`skill-updates`） | 定期実行の書き換えを拒否するフックと定期実行のスクリプト（コロン区切り。スキルの置き場所からの相対パスか絶対パス）。指定すると既定を置き換える |
 
 例（2つ目の設定ディレクトリを使い、別のアカウントで起動するラッパーを使う場合）:
 
@@ -374,7 +376,7 @@ core/tests/run.sh
 | `core/tests/test_markdown_lite.py` | Markdown の整形（見出し・段落・入れ子の箇条書き・表・コードの囲み・引用・水平線・行内の要素、`<script>` と `javascript:` のリンクのエスケープ） |
 | `core/tests/test_apply.py` | 「承認して反映」: ふつうの差分が当たって `applied` になり台帳に `applied` の行が足されること・直す前の版の複製・二度押しと同時押しで二重に当たらないこと・一致しない差分と反映済みの内容で何も変えず `hold` になること・offset は1か所に決まるときだけ許すこと・ファイルの新規作成と削除・複数ファイルの途中の失敗と台帳への書き込みの失敗で全部戻ること・移し先の確認の印・「移さない」のメモ・削除の手段の記載があっても差分の全体を反映すること・スキルの削除で全ファイルと空になったフォルダを消し、他のファイルが残るフォルダは残すこと・自動で反映しない案（差分なし・崩れた差分・`targets` 外・リンクのスキルの削除）が `approved` のまま残ること・ホームの外・`..`・外を指すリンク・置き場所の中への書き込みを拒むこと・ホームの中を指すリンクは許すこと・他の `Origin` と合言葉の不一致と `text/plain` の拒否・フォームの POST での結果表示・`127.0.0.1` だけで待ち受けること |
 | `core/tests/test_approved.py` | 承認済みの判定（台帳あり・なし・本文の書き換え・最新が approved でない）、件数の集計、案の作成 |
-| `core/tests/test_install.sh` | 一時の `HOME` と偽の `launchctl`・`brew`・`open`・`terminal-notifier` で、7件のリンク・3つのフック・jobs.conf の設定ディレクトリの一覧・2回実行・`--dry-run`・`--uninstall`・旧版の後始末・スキル置き場を経由したフックを二重に足さないこと・旧位置を経由したリンクの張り直しと外し方・試しの通知 |
+| `core/tests/test_install.sh` | 一時の `HOME` と偽の `launchctl`・`brew`・`open`・`terminal-notifier` で、8件のリンク・4つのフック・jobs.conf の設定ディレクトリの一覧・2回実行・`--dry-run`・`--uninstall`・旧版の後始末・スキル置き場を経由したフックを二重に足さないこと・旧位置を経由したリンクの張り直しと外し方・試しの通知 |
 | `core/tests/test_install_schedule.sh` | 一時の `HOME` と偽の `launchctl` で、週1回の見直しの登録（非端末・聞かれて `n`／`y`・`--with-schedule`・`--no-schedule`・`claude` が無いとき・2回実行・既存のラベルの引き継ぎ）、旧版の後始末、`--uninstall`、見回りの範囲の問いと `patrol.conf`、`--dry-run` の表示。端末からの実行は疑似端末で模す |
 | `core/tests/test_install_prereq.sh` | 一時の `HOME` と偽の `xcode-select`・`/usr/bin/python3`・`brew`・Homebrew の公式の手順・`terminal-notifier`・`claude`・`launchctl` で、必要なものの確認（全部そろっているとき聞かない、コマンドラインツールが無いとき `y`／`N`／非端末／`--yes`／`--dry-run`、Python が古いとき、Homebrew と `terminal-notifier` が無いとき `y`／`N`、`claude` が無いとき週1回の見直しを登録しない、plist の `PATH`）、`jq` を使わないフックの追加と削除 |
 | `core/tests/test_link_scopes.sh` | 一時の `HOME` に実体が別のフォルダにあるリンクのスキルを置き、3つの定期実行の `--dry-run` の出力に実体の `Read` が1回ずつ入ること、実体の無いリンクで落ちないこと、リンクの先の実体の `Edit` を拒否すること |

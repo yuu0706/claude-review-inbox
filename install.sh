@@ -56,10 +56,11 @@ BREW_INSTALLER="${CLAUDE_REVIEW_BREW_INSTALLER:-}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_DIR="$HOME/.local/state/claude-review-inbox"
 PROPOSALS_DIR="$HOME/claude-reports/proposals"
-# SessionStart フックに登録するコマンド。report-inbox の件数の1行と、2つの見回りの起動である。
+# SessionStart フックに登録するコマンド。report-inbox の件数の1行、2つの見回りの起動、外部スキルの新しい版の確認である。
 HOOK_CMDS=("$REPO/core/skills/report-inbox/scripts/unread.sh"
   "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
-  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh")
+  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh"
+  "$REPO/core/skills/skill-updates/scripts/run-if-due.sh")
 # 旧版が登録したフック（スクリプトは削除済み）。report-inbox の unread.sh と同じ件数を出すため、見つけたら外す。
 LEGACY_HOOK_CMD="$REPO/core/hooks/session-start.sh"
 # 見回りの範囲の設定ファイル。repo-patrol と secret-patrol が読む。

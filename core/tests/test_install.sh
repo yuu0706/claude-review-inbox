@@ -105,9 +105,9 @@ S2="$HOME/${ALT_DIR}/skills"
 LABEL="com.$(id -un | tr . -).claude-review-inbox"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 HOOKS=("$REPO/core/skills/report-inbox/scripts/unread.sh" "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
-  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh")
+  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh" "$REPO/core/skills/skill-updates/scripts/run-if-due.sh")
 LEGACY_HOOK="$REPO/core/hooks/session-start.sh"
-# 引数: <settings.json> [<コマンド>]。コマンドを省くと、登録する3つの合計を数える。
+# 引数: <settings.json> [<コマンド>]。コマンドを省くと、登録する4つの合計を数える。
 hook_count() {
   local f="$1" c n=0 k
   if [ $# -ge 2 ]; then
@@ -164,8 +164,8 @@ while IFS= read -r s; do
   n_links=$((n_links + 1))
   [ -L "$S2/${s##*/}" ] && [ "$(readlink "$S2/${s##*/}")" = "$s" ] || ok_links=0
 done < <(repo_skills)
-check "core/skills の全スキル（${n_links}件）がリンクになる" '[ "$ok_links" -eq 1 ] && [ "$n_links" -ge 7 ]'
-for n in change-review memory-audit feedback-mining skill-audit report-inbox repo-patrol secret-patrol; do
+check "core/skills の全スキル（${n_links}件）がリンクになる" '[ "$ok_links" -eq 1 ] && [ "$n_links" -ge 8 ]'
+for n in change-review memory-audit feedback-mining skill-audit report-inbox repo-patrol secret-patrol skill-updates; do
   check "スキル $n をリンクする" '[ -L "$S2/$n" ]'
 done
 check "review-loop を置かない" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ]'
@@ -176,7 +176,7 @@ check "plist のラベル・サーバー・常駐の設定" '[ "$(plutil -extrac
 check "ログの置き場所を状態の置き場所にする" '[ "$(plutil -extract StandardOutPath raw "$PLIST")" = "$HOME/.local/state/claude-review-inbox/server.log" ]'
 check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
 check "未登録なら bootout しない" '! grep -q "launchctl bootout" "$CALLS"'
-check "両方の settings.json に3つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "3" ] && [ "$(hook_count "$HOME/${ALT_DIR}/settings.json")" = "3" ] && each_hook_once "$HOME/.claude/settings.json"'
+check "両方の settings.json に4つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "4" ] && [ "$(hook_count "$HOME/${ALT_DIR}/settings.json")" = "4" ] && each_hook_once "$HOME/.claude/settings.json"'
 check "旧版のフック（session-start.sh）は足さない" '[ "$(hook_count "$HOME/.claude/settings.json" "$LEGACY_HOOK")" = "0" ]'
 check "既存の設定を消さない" '[ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/${ALT_DIR}/settings.json")" = "dark" ]'
 check "書き換える前に settings.json.bak-<日時> を残す" '[ "$(ls "$HOME/.claude/"settings.json.bak-* | wc -l | tr -d " ")" = "1" ] && grep -q "/other/hook.sh" "$HOME/.claude/"settings.json.bak-* && ! grep -q "unread.sh" "$HOME/.claude/"settings.json.bak-*'
@@ -205,7 +205,7 @@ check "終了コード0" '[ "$rc" -eq 0 ]'
 check "旧版の review-loop のリンクを外す" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ] && printf "%s" "$out" | grep -Fq "旧版の review-loop のリンクを消しました: $S2/review-loop"'
 check "外した review-loop は .trash へ移さない" '[ -z "$(ls -d "$S2/.trash/"*-review-loop 2>/dev/null)" ]'
 check "既存の実体（memory-audit）は退避してリンクにする" '[ -f "$(ls -d "$S2/.trash/"*-memory-audit)/SKILL.md" ] && [ -L "$S2/memory-audit" ]'
-check "旧版のフックを外し、3つのフックを足す" '[ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$LEGACY_HOOK")" = "0" ] && each_hook_once "$HOME/${ALT_DIR}/settings.json"'
+check "旧版のフックを外し、4つのフックを足す" '[ "$(hook_count "$HOME/${ALT_DIR}/settings.json" "$LEGACY_HOOK")" = "0" ] && each_hook_once "$HOME/${ALT_DIR}/settings.json"'
 check "他のフックと設定は残る" '[ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/${ALT_DIR}/settings.json")" = "dark" ]'
 sig2="$(tree_sig)"
 "$REPO/install.sh" >/dev/null 2>&1

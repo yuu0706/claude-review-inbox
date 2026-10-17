@@ -103,7 +103,7 @@ approval_mode() {
 # 既定で書き換えを拒否するスクリプトの置き場所。フック（gitleaks-pre-commit.sh・tag-memory-repo.sh・SessionStart の
 # unread.sh・run-if-due.sh・session-trigger.sh）と、それらが読み込む部品、定期実行の起動スクリプトを含む。
 # 定期実行が自分の起動スクリプトを書き換えると、次の実行で拒否の規則そのものを外せるため、起動スクリプトも含める。
-GUARDED_PATHS_DEFAULT="security-rules/scripts:memory-audit/scripts:report-inbox/scripts:repo-patrol/scripts:secret-patrol/scripts:skill-audit/scripts:feedback-mining/scripts:change-review/scripts"
+GUARDED_PATHS_DEFAULT="security-rules/scripts:memory-audit/scripts:report-inbox/scripts:repo-patrol/scripts:secret-patrol/scripts:skill-audit/scripts:feedback-mining/scripts:change-review/scripts:skill-updates/scripts"
 
 # 書き換えを拒否する場所を「d<TAB>パス」（フォルダ）か「f<TAB>パス」（ファイル）で1行1件ずつ出力する。
 # リンクの表記と実体のパスの両方を出す。

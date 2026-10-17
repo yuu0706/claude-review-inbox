@@ -1,6 +1,6 @@
 ---
 name: report-inbox
-description: 定期実行のジョブ（repo-patrol・feedback-mining・memory-audit・secret-patrol）が ~/claude-reports/ に書いた結果と、5つのジョブ（skill-audit を含む）の失敗の知らせを一覧にし、開き、既読にするときに使う。会話の開始時に「未読の結果」が表示されたとき、「結果を見せて」「未読の結果は？」「レポートを見て」と言われたときに使う。各ジョブの結果の読み方は、ジョブごとのスキルに従う。
+description: 定期実行のジョブ（repo-patrol・feedback-mining・memory-audit・secret-patrol・skill-audit の公開版の点検）が ~/claude-reports/ に書いた結果と、5つのジョブの失敗の知らせを一覧にし、開き、既読にするときに使う。会話の開始時に「未読の結果」が表示されたとき、「結果を見せて」「未読の結果は？」「レポートを見て」と言われたときに使う。各ジョブの結果の読み方は、ジョブごとのスキルに従う。
 ---
 
 # 定期実行の結果の受け取り
@@ -15,6 +15,7 @@ description: 定期実行のジョブ（repo-patrol・feedback-mining・memory-a
 | `memory-audit` | 月曜 10:30 | Skill `memory-audit` |
 | `feedback-mining` | 月曜 11:00 | Skill `feedback-mining` |
 | `secret-patrol` | 会話の開始時（7日ごと。SessionStart の hook） | Skill `secret-patrol` |
+| `skill-updates` | 会話の開始時（1日1回。SessionStart の hook。新しい版があった日だけ書く） | Skill `skill-updates` |
 
 `skill-audit`（月曜 10:00）は精査の記録を `${SKILL_AUDIT_STATE:-~/.local/state/skill-audit}/history.md` に書く。精査は報告しない決まりのため記録は扱わないが、失敗は他のジョブと同じく知らせる。
 公開版の点検で当たりなどがあった場合だけ、`skill-audit` は結果を `~/claude-reports/skill-audit/<YYYY-MM-DD>.md` に書く。読み方は Skill `skill-audit` の「2.8 公開版の点検」に従う。
