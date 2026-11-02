@@ -14,7 +14,7 @@ export HOME="$WORK/home"
 unset CLAUDE_REPORTS_ROOT CLAUDE_REPORTS_STATE CLAUDE_REVIEW_PROPOSALS CLAUDE_REVIEW_STATE \
   SKILL_AUDIT_ROOT SKILL_AUDIT_STATE MEMORY_AUDIT_TARGETS FEEDBACK_MINING_SOURCES XDG_CONFIG_HOME \
   CLAUDE_LAUNCHER CLAUDE_REVIEW_DENY_READ CLAUDE_REVIEW_CONFIG_DIRS SKILL_AUDIT_EXCLUDE SKILL_AUDIT_OWN_LINK_ROOTS \
-  CLAUDE_REVIEW_GUARDED_PATHS SKILL_AUDIT_PROTECTED CLAUDE_REVIEW_APPROVAL_MODE
+  CLAUDE_REVIEW_GUARDED_PATHS SKILL_AUDIT_PROTECTED CLAUDE_REVIEW_CHANGES_LOG
 export CHANGE_REVIEW_SCRIPTS="$REPO/core/skills/change-review/scripts"
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
 export CLAUDE_CHANGE_LEDGER="$WORK/change-ledger"
@@ -65,7 +65,7 @@ for job in memory-audit feedback-mining skill-audit; do
     "Edit(/$REPO/core/skills/feedback-mining/scripts/**)" "Edit(/$REPO/core/skills/repo-patrol/scripts/**)" \
     "Edit(/$REPO/core/skills/secret-patrol/scripts/**)" \
     "Edit(/$HOME/.claude/CLAUDE.md)" "Edit(/$HOME/.claude/settings.json)" "Edit(/$HOME/.claude/settings.local.json)" \
-    "Edit(/$CLAUDE_CHANGE_LEDGER/**)"; do
+    "Edit(/$CLAUDE_CHANGE_LEDGER/**)" "Edit(/$HOME/.local/state/claude-reports/changes/log.md)"; do
     check "${job}: 拒否する: ${rule#Edit(/$WORK}" 'in_deny "$rule" "$out"'
   done
   for rule in "Edit(/$SEC_REAL/**)" "Edit(/$REPO/core/skills/report-inbox/scripts/**)"; do
@@ -73,9 +73,9 @@ for job in memory-audit feedback-mining skill-audit; do
   done
 done
 
-echo "== skill-audit: 自作のスキルの実体全体に Edit を許可していても、フックのスクリプトは拒否の側にある"
+echo "== skill-audit: 元のスキルへの編集は許可しない"
 out="$(run_job skill-audit)"
-check "自作のスキル（report-inbox）の実体には Edit を許可している" 'in_allow "Edit(/$REPO/core/skills/report-inbox/**)" "$out"'
+check "自作のスキル（report-inbox）の実体には Edit を許可しない" '! in_allow "Edit(/$REPO/core/skills/report-inbox/**)" "$out"'
 check "その scripts は拒否する（拒否の規則が許可より優先する）" 'in_deny "Edit(/$REPO/core/skills/report-inbox/scripts/**)" "$out"'
 
 echo "== 設定で拒否する場所を変えられる"
@@ -95,6 +95,15 @@ g="$(guard_paths "$HOME/.claude" -- "$SK")"
 check "重複が無い" '[ -z "$(printf "%s\n" "$g" | sort | uniq -d)" ]'
 check "形は「d か f<TAB>パス」" '[ -z "$(printf "%s\n" "$g" | grep -v "^[df]	/")" ]'
 check "台帳の既定は ~/.local/state/claude-change-ledger" '[ "$(env -u CLAUDE_CHANGE_LEDGER bash -c ". \"$CHANGE_REVIEW_SCRIPTS/link-scopes.sh\"; change_ledger_dir")" = "$HOME/.local/state/claude-change-ledger" ]'
+
+echo "== 記録の差し替えとリンクの実体"
+printf '# 記録\n' >"$WORK/actual-log.md"
+ln -s "$WORK/actual-log.md" "$WORK/log.md"
+export CLAUDE_REVIEW_CHANGES_LOG="$WORK/log.md"
+for job in memory-audit feedback-mining skill-audit; do
+  out="$(run_job "$job")"
+  check "${job}: 記録をリンクと実体の両方で拒否する" 'in_deny "Edit(/$WORK/log.md)" "$out" && in_deny "Edit(/$WORK/actual-log.md)" "$out"'
+done
 
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

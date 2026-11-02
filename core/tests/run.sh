@@ -26,10 +26,7 @@ run_test() {
   fi
 }
 
-run_test "core: 承認済みの判定・集計・案の作成" "$PYTHON" "$TESTS_DIR/test_approved.py"
-run_test "core: Markdown の整形" "$PYTHON" "$TESTS_DIR/test_markdown_lite.py"
-run_test "core: サーバー" "$PYTHON" "$TESTS_DIR/test_server.py"
-run_test "core: 承認して反映" "$PYTHON" "$TESTS_DIR/test_apply.py"
+run_test "core: 直したいことの記録" "$PYTHON" -B "$TESTS_DIR/test_changes.py"
 run_test "core: install.sh" bash "$TESTS_DIR/test_install.sh"
 run_test "core: install.sh の定期実行" bash "$TESTS_DIR/test_install_schedule.sh"
 run_test "core: install.sh の必要なものの確認" bash "$TESTS_DIR/test_install_prereq.sh"

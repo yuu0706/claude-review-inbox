@@ -20,12 +20,11 @@ unset XDG_CONFIG_HOME CLAUDE_REVIEW_DENY_READ SKILL_AUDIT_OWN_LINK_ROOTS
 export CLAUDE_LAUNCHER=true
 export CLAUDE_REVIEW_JOBS_CONF="$WORK/jobs.conf"
 export CLAUDE_REVIEW_CONFIG_DIRS="$HOME/.claude:$HOME/${ALT_DIR}"
-# 承認待ちの置き場所と台帳は一時ディレクトリにする。案を作るスクリプトはリポジトリの core のものを使う。
+# 否認・訂正のリストと台帳は一時ディレクトリにする。記録のスクリプトは core のものを使う。
 export CLAUDE_REVIEW_PROPOSALS="$WORK/proposals"
 export CLAUDE_REVIEW_STATE="$WORK/review-state"
 export CHANGE_REVIEW_SCRIPTS="$(cd "$SCRIPT_DIR/../../change-review/scripts" && pwd -P)"
-# 承認なし（auto）の動きを既定として検査する。承認あり（screen）は別の節で確かめる。変更の台帳は一時の場所に置く。
-export CLAUDE_REVIEW_APPROVAL_MODE=auto
+export CLAUDE_REVIEW_CHANGES_LOG="$WORK/changes/log.md"
 export CLAUDE_CHANGE_LEDGER="$WORK/change-ledger"
 unset CLAUDE_REVIEW_GUARDED_PATHS SKILL_AUDIT_PROTECTED
 PDIR="$CLAUDE_REVIEW_PROPOSALS"
@@ -88,56 +87,23 @@ done
 check "拒否後も対象が残っている" '[ -d "$R/synced" ] && [ -L "$R/linked" ] && [ -d "$R/skill-audit" ] && [ -d "$WORK/external/linked" ]'
 mv "$moved" "$R/beta"
 
-echo "== run-audit.sh --dry-run（初回）"
-printf 'CLAUDE_REVIEW_DENY_READ=~/sync-a\n' >"$CLAUDE_REVIEW_JOBS_CONF"
-out="$("$SCRIPT_DIR/run-audit.sh" --dry-run)"
-rc=$?
-check "初回は終了コード0" '[ "$rc" -eq 0 ]'
-has() { printf '%s' "$out" | grep -Fq -- "$1"; }
-for rule in "Edit(/$R/**)" "Bash($SCRIPT_DIR/snapshot.sh:*)" "Bash($SCRIPT_DIR/trash-skill.sh:*)" \
-  "Read(/$R/**)" "Read(/$HOME/.claude/**)" "Read(/$HOME/${ALT_DIR}/**)" "'Skill'" \
-  "Read(/$HOME/.config/claude-skills/skill-audit.local.md)" \
-  "利用者の環境だけの決まりは $HOME/.config/claude-skills/skill-audit.local.md にある（無ければ飛ばす）。" \
-  "Read(/$HOME/Library/CloudStorage/**)" "Read(/$HOME/sync-a/**)" "&& 'true' '-p'" \
-  "Edit(/$R/synced/**)" "Edit(/$R/plugins/**)" "Edit(/$R/vendored/**)" \
-  "Edit(/$R/.trash/**)" "Edit(/$R/linked/**)" "Edit(/$WORK/external/linked/**)" \
-  "Edit(/$HOME/.agents/**)" "Edit(/$HOME/Documents/**)" "Edit(/$HOME/${ALT_DIR}/CLAUDE.md)" \
-  "Edit(/$HOME/.claude/CLAUDE.md)" "Edit(/$HOME/${ALT_DIR}/settings.json)" "Edit(/$HOME/.claude/settings.json)" \
-  "--disallowedTools" "'--model' 'opus' '--effort' 'low'" "cd '$R' &&" \
-  "否認リストは $PDIR/rejections.md にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は行わない。" \
-  "Read(/$PDIR/**)" "Edit(/$PDIR/**)" "Edit(/$CLAUDE_REVIEW_STATE/**)" \
-  "Read(/$HF)" "Edit(/$HF)" "Read(/$HD/**)" "変更の記録は $HF に書く。直す前の複製は snapshot.sh が $HD/<日付>/ に置く。" \
-  "'--permission-mode' 'default'"; do
-  check "dry-run の出力に含む: $rule" 'has "$rule"'
-done
-# 南京錠: 安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳は、拒否の側にだけ入る。
+echo "== run-audit.sh --dry-run"
+out="$("$SCRIPT_DIR/run-audit.sh" --dry-run)"; rc=$?
+check "初回は正常終了" '[ "$rc" -eq 0 ]'
+allow_part="$(printf '%s' "$out" | sed -n "s/.*'--allowedTools'\(.*\)'--disallowedTools'.*/\1/p")"
 deny_part="${out#*--disallowedTools}"
-for rule in "Edit(/$R/security-rules/**)" "Edit(/$R/commit-guard/**)" "Edit(/$R/security-rules/scripts/**)" \
-  "Edit(/$R/report-inbox/scripts/**)" "Edit(/$R/repo-patrol/scripts/**)" "Edit(/$R/secret-patrol/scripts/**)" \
-  "Edit(/$R/memory-audit/scripts/**)" "Edit(/$R/skill-audit/scripts/**)" "Edit(/$R/change-review/scripts/**)" \
-  "Edit(/$HOME/.claude/skills/security-rules/**)" "Edit(/$HOME/.claude/settings.local.json)" \
-  "Edit(/$HOME/${ALT_DIR}/settings.local.json)" "Edit(/$CLAUDE_CHANGE_LEDGER/**)"; do
-  check "拒否の側に含む: $rule" 'printf "%s" "$deny_part" | grep -Fq -- "'"'"'$rule'"'"'"'
+for rule in "Edit(/$R/**)" "Edit(/$CLAUDE_REVIEW_CHANGES_LOG)" "Edit(/$HF)" "Edit(/$HD/**)" \
+  "Edit(/$PDIR/**)" "Edit(/$CLAUDE_REVIEW_STATE/**)" "Edit(/$HOME/.claude/CLAUDE.md)" \
+  "Edit(/$HOME/.claude/settings.json)" "Read(/$HOME/Library/CloudStorage/**)"; do
+  check "拒否側に含む: $rule" 'printf "%s" "$deny_part" | grep -Fq "$rule"'
 done
-# snapshot.sh と trash-skill.sh は、実体・スキル置き場を経由したパス（両アカウント）・作業のフォルダからの相対パスの各形を許可する。
-for sc in snapshot.sh trash-skill.sh; do
-  for sp in "$SCRIPT_DIR/$sc" "$R/skill-audit/scripts/$sc" "$HOME/${ALT_DIR}/skills/skill-audit/scripts/$sc" \
-    "$HOME/.claude/skills/skill-audit/scripts/$sc" "skill-audit/scripts/$sc" "./skill-audit/scripts/$sc"; do
-    check "dry-run の出力に含む: Bash($sp:*)" 'has "'"'"'Bash($sp:*)'"'"'"'
-  done
-done
-check "依頼文に snapshot.sh と trash-skill.sh を呼ぶ絶対パスを入れる" 'has "複製は $R/skill-audit/scripts/snapshot.sh、スキルの削除は $R/skill-audit/scripts/trash-skill.sh を、この絶対パスのとおりに呼ぶ"'
-allow_part="${out%%--disallowedTools*}"
-check "許可側に除外ディレクトリの規則を含まない" '! printf "%s" "$allow_part" | grep -Fq "synced"'
-check "許可側に範囲を付けない Read を含まない" '! printf "%s" "$allow_part" | grep -Fq "'"'"'Read'"'"'"'
-check "許可側に任意のパスを読める Bash を含まない" '! printf "%s" "$allow_part" | grep -Eq "Bash\\((ls|grep|rg|stat|wc|cmp|diff|readlink):"'
-check "許可側に承認待ちの置き場所と台帳の Edit を含まない" '! printf "%s" "$allow_part" | grep -Fq "Edit(/$PDIR" && ! printf "%s" "$allow_part" | grep -Fq "Edit(/$CLAUDE_REVIEW_STATE"'
-check "許可側に読み取りを拒否する場所の規則を含まない" '! printf "%s" "$allow_part" | grep -Eq "CloudStorage|sync-a"'
-rm -f "$CLAUDE_REVIEW_JOBS_CONF"
-check "dry-run は last-hash を作らない" '[ ! -f "$SKILL_AUDIT_STATE/last-hash" ]'
+check "元のスキルの Edit を許可しない" '! printf "%s" "$allow_part" | grep -Fq "Edit(/$R/"'
+check "履歴と記録の Edit を許可しない" '! printf "%s" "$allow_part" | grep -Fq "Edit(/$HF)" && ! printf "%s" "$allow_part" | grep -Fq "Edit(/$CLAUDE_REVIEW_CHANGES_LOG)"'
+check "snapshot と trash の Bash を許可しない" '! printf "%s" "$allow_part" | grep -Eq "Bash\\(.*(snapshot|trash-skill)"'
+check "作業用の複製を編集する" 'printf "%s" "$allow_part" | grep -Eq "Edit\\(/.*/staging/\\*\\*\\)"'
+check "dry-run は実行の複製と last-hash を作らない" '[ ! -e "$SKILL_AUDIT_STATE/runs" ] && [ ! -e "$SKILL_AUDIT_STATE/last-hash" ]'
 check "dry-run はログを作らない" '[ -z "$(ls "$SKILL_AUDIT_STATE/logs")" ]'
-check "lock が解放されている" '[ ! -d "$SKILL_AUDIT_STATE/lock" ]'
-
+check "lock を解放する" '[ ! -d "$SKILL_AUDIT_STATE/lock" ]'
 echo "== run-audit.sh 通常実行（CLAUDE_LAUNCHER=true）"
 "$SCRIPT_DIR/run-audit.sh"
 rc=$?
@@ -159,189 +125,122 @@ echo "== --force"
 out="$("$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
 check "--force ではスキップされない" 'printf "%s" "$out" | grep -q -- "--allowedTools"'
 
-echo "== 追加は残し、修正・削除は戻して承認待ちにする"
-mkdir -p "$R/gamma/ref"
-echo "gamma" >"$R/gamma/SKILL.md"
-echo "gamma ref" >"$R/gamma/ref/a.md"
-printf '# スキルの変更履歴\n\n説明\n\n---\n\n## 2000-01-01 依頼\n\n- 古い記録\n' >"$HF"
-printf 'beta\nline2\n' >"$R/beta/SKILL.md"
+echo "== 追加・修正・削除は記録するだけ"
 FAKE="$WORK/fake-claude"
-cat >"$FAKE" <<'EOF2'
+cat >"$FAKE" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$@" >"$FAKE_ARGS"
-bash -c "$FAKE_HOOK" || exit 9
+export STAGE="$PWD"
+export RUN_DIR="${PWD%/staging}"
+export DEST="$RUN_DIR/destinations"
+if [ -n "${FAKE_HOOK:-}" ]; then bash -c "$FAKE_HOOK" || exit 9; fi
 exit "${FAKE_RC:-0}"
-EOF2
+EOF
 chmod +x "$FAKE"
-export FAKE_ARGS="$WORK/fake-args" SCRIPT_DIR R HF HD
-HOOK='N="$(grep -o "/[A-Za-z0-9._/-]*/needs-approval.tsv" "$FAKE_ARGS" | head -1)" &&
-printf "%s\t%s\n" "$R/beta/SKILL.md" "判断に迷う" "$R/alpha/sub" "参照先の確認が要る" "$R/gamma" "使用実績の確認が要る" >"$N" &&
-printf "added\n" >>"$R/alpha/SKILL.md" &&
-printf "beta\nline2 changed\n" >"$R/beta/SKILL.md" &&
-rm "$R/alpha/sub/ref.md" &&
-echo new >"$R/alpha/new2.md" &&
-mkdir -p "$R/delta" && echo delta >"$R/delta/SKILL.md" &&
-echo "snap" >"$HD/2000-01-01/z.bak" &&
-awk "{print} /^---\$/{print \"\"; print \"## 自動の記録（claude）\"}" "$HF" >"$R/h.tmp" && mv "$R/h.tmp" "$HF" &&
-"$SCRIPT_DIR/trash-skill.sh" gamma >/dev/null'
-alpha_before="$(cat "$R/alpha/SKILL.md")"
-CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK" "$SCRIPT_DIR/run-audit.sh" --force
-rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "追加だけの変更は残る" '[ "$(cat "$R/alpha/SKILL.md")" = "${alpha_before}${NL}added" ]'
-check "新しいファイルと新しいスキルは残る" '[ -f "$R/alpha/new2.md" ] && [ -f "$R/delta/SKILL.md" ]'
-check "修正は実行前の版に戻る" '[ "$(cat "$R/beta/SKILL.md")" = "beta${NL}line2" ]'
-check "削除されたファイルは戻る" '[ "$(cat "$R/alpha/sub/ref.md")" = "changed" ]'
-check "削除されたスキルは戻る（.skill-audit-trash から）" '[ -f "$R/gamma/SKILL.md" ] && [ -f "$R/gamma/ref/a.md" ] && [ -z "$(ls -d "$R/.skill-audit-trash/"*-gamma 2>/dev/null)" ]'
-check "history の下の変更は比べない" '[ -f "$HD/2000-01-01/z.bak" ]'
-props="$(ls "$PDIR"/*.md 2>/dev/null)"
-printf '%s\n' "$props"
-check "承認待ちは3件（修正・ファイルの削除・スキルの削除）" '[ "$(printf "%s\n" "$props" | grep -c .)" = "3" ]'
-p_edit="$(grep -l "^  - $R/beta/SKILL.md\$" $props)"
-p_file="$(grep -l "^  - $R/alpha/sub/ref.md\$" $props)"
-p_skill="$(grep -l "^  - $R/gamma\$" $props)"
-check "修正の案: 差分は実行前から実行後へ、見出しは絶対パス" '[ -f "$p_edit" ] && grep -Fxq -- "--- $R/beta/SKILL.md" "$p_edit" && grep -Fxq -- "-line2" "$p_edit" && grep -Fxq "+line2 changed" "$p_edit" && grep -Fxq "status: pending" "$p_edit" && grep -q "^source: skill-audit（自動の精査 " "$p_edit"'
-check "ファイルの削除の案" '[ -f "$p_file" ] && grep -Fxq -- "-changed" "$p_file" && grep -q "の削除（skill-audit の自動の精査）" "$p_file"'
-check "スキルの削除の案: 全ファイルの削除差分を入れ、承認されればそのまま反映すると書く" '[ -f "$p_skill" ] && grep -Fxq -- "--- $R/gamma/SKILL.md" "$p_skill" && grep -Fxq -- "--- $R/gamma/ref/a.md" "$p_skill" && grep -Fxq -- "-gamma ref" "$p_skill" && grep -Fq "承認されるとそのまま反映し、空になったフォルダも消す" "$p_skill" && ! grep -Fq "trash-skill.sh gamma" "$p_skill"'
-hist="$(cat "$HF")"
-check "history.md の先頭に記録を足す（claude の追記も残る）" 'printf "%s" "$hist" | grep -q "自動（run-audit.sh の記録）" && printf "%s" "$hist" | grep -Fq "## 自動の記録（claude）" && [ "$(printf "%s\n" "$hist" | grep -n "run-audit.sh の記録" | cut -d: -f1)" -lt "$(printf "%s\n" "$hist" | grep -n "2000-01-01 依頼" | cut -d: -f1)" ]'
-check "history.md に件数と番号を書く" 'printf "%s" "$hist" | grep -Fq -- "- 承認待ちにした変更: 3件（" && printf "%s" "$hist" | grep -Fq -- "- 承認なしで反映した変更: 3件" && printf "%s" "$hist" | grep -Fq -- "\`$R/alpha/new2.md\`（追加。種類 \`skill-audit/追加/alpha\`。新しいファイル。消せば戻る）" && printf "%s" "$hist" | grep -Fq -- "\`$R/delta\`（追加。種類 \`skill-audit/追加/delta\`。新しいスキル。"'
-check "承認待ちの理由に精査の判断を載せる" 'grep -Fq "精査が承認が要ると判断した（判断に迷う）" "$p_edit" && grep -Fq "精査が承認が要ると判断した（参照先の確認が要る）" "$p_file" && grep -Fq "精査が承認が要ると判断した（使用実績の確認が要る）" "$p_skill"'
-check "依頼文に訂正リストの場所を含む" 'grep -Fq "訂正リストは $PDIR/corrections.md にある。" "$FAKE_ARGS"'
-check "依頼文に needs-approval.tsv の書き方を含む" 'grep -Fq "/needs-approval.tsv に「対象の絶対パス<TAB>理由」の形で1行1件書く" "$FAKE_ARGS"'
-check "needs-approval.tsv への書き込みを許可する" 'grep -q "^Edit(/.*/needs-approval.tsv)$" "$FAKE_ARGS"'
-res="$(ls "$HOME/claude-reports/skill-audit/"*.md 2>/dev/null | head -1)"
-check "結果のファイルに承認なしで反映した変更と承認待ちを書く" '[ -f "$res" ] && grep -qx "## 承認なしで反映した変更と承認待ち" "$res" && grep -Fq "承認なしで反映した変更 3件 / 承認待ちにした変更 3件" "$res" && grep -qx "### 承認待ちにした変更" "$res"'
-rm -rf "$HOME/claude-reports"
-check "冒頭の説明は残る" '[ "$(head -1 "$HF")" = "# スキルの変更履歴" ]'
-check "実行前の複製を runs に残す" '[ -f "$(ls -d "$SKILL_AUDIT_STATE/runs/"*/ | tail -1)before/beta/SKILL.md" ]'
-check "台帳には書かない" '[ ! -e "$CLAUDE_REVIEW_STATE/decisions.jsonl" ]'
-rm -rf "$R/delta" "$R/gamma" "$R/alpha/new2.md" "$HF"
+export FAKE_ARGS="$WORK/fake-args" SCRIPT_DIR R HF HD WORK
+entry_for() {
+  awk -v t="$1" '/^## / { if (found) { printf "%s", entry; exit } entry=$0 "\n"; found=0; next }
+    { entry=entry $0 "\n"; if ($0 ~ /^- 対象: / && index($0, "`" t "`")) found=1 }
+    END { if (found) printf "%s", entry }' "$CLAUDE_REVIEW_CHANGES_LOG"
+}
+printf 'alpha\nold\n' >"$R/alpha/SKILL.md"
+printf 'beta\n- gamma を使う\n' >"$R/beta/SKILL.md"
+mkdir -p "$R/gamma" "$R/security-rules"
+printf 'gamma\n' >"$R/gamma/SKILL.md"
+printf 'secret rule\n' >"$R/security-rules/SKILL.md"
+cp -Rp "$R" "$WORK/before-root"
+printf '# 既存の変更履歴\n' >"$HF"
+HOOK='printf "alpha\nnew\n" >"$STAGE/alpha/SKILL.md" &&
+printf "new file\n" >"$STAGE/alpha/new.md" &&
+printf "beta\n" >"$STAGE/beta/SKILL.md" &&
+printf "%s\t%s\n" "$R/gamma" "重複" "$R/alpha/sub/ref.md" "古い経緯" >"$RUN_DIR/deletions.tsv" &&
+printf "updated rule\n" >"$STAGE/security-rules/SKILL.md" &&
+mkdir -p "$STAGE/new-skill" && printf "new skill\n" >"$STAGE/new-skill/SKILL.md" &&
+for target in "$R/alpha/SKILL.md" "$R/alpha/sub/ref.md" "$R/gamma" "$R/security-rules/SKILL.md"; do
+D="$DEST$target"; mkdir -p "$D"
+printf "| No | 消える記述 | 行き先 | 場所 |\n| --- | --- | --- | --- |\n| 1 | 古い経緯 | 決まりではない（経緯の記録） | — |\n" >"$D/table.md"
+done'
+CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK" "$SCRIPT_DIR/run-audit.sh" --force; rc=$?
+check "正常終了" '[ "$rc" -eq 0 ]'
+check "元のスキルは追加・修正・削除とも変更しない" 'diff -r "$WORK/before-root" "$R" >/dev/null'
+check "history.md に反映の記録を足さない" '[ "$(cat "$HF")" = "# 既存の変更履歴" ]'
+check "新しい台帳を作らない" '[ ! -e "$CLAUDE_CHANGE_LEDGER" ]'
+check "追加2件・修正2件・削除2件を記録する" '[ "$(grep -c "^## " "$CLAUDE_REVIEW_CHANGES_LOG")" = 6 ]'
+check "全項目が未対応" '[ "$(grep -c "^- 状態: 未対応$" "$CLAUDE_REVIEW_CHANGES_LOG")" = 6 ]'
+check "安全の規則以外は直してよい" '[ "$(grep -c "^- 区分: 直してよい$" "$CLAUDE_REVIEW_CHANGES_LOG")" = 5 ]'
+check "安全の規則の修正は要確認" 'entry_for "$R/security-rules/SKILL.md" | grep -Fq "区分: 要確認（安全のための規則のスキル"'
+check "スキルの削除と参照の修正をまとめる" 'entry_for "$R/gamma" | grep -Fxq -- "--- $R/beta/SKILL.md" && entry_for "$R/gamma" | grep -Fxq -- "-- gamma を使う"'
+check "参照の修正を別項目にしない" '! grep -q "^- 直したいこと: beta/" "$CLAUDE_REVIEW_CHANGES_LOG"'
+check "差分の見出しは元の絶対パス" 'entry_for "$R/alpha/new.md" | grep -Fxq -- "--- $R/alpha/new.md" && entry_for "$R/alpha/new.md" | grep -Fxq "+++ $R/alpha/new.md"'
+rep="$(ls -t "$HOME/claude-reports/skill-audit/"*.md | head -1)"
+check "結果は ID・区分・対象・要約を載せる" 'grep -Fxq "## 記録に足した直したいこと（ID・区分・対象・要約）" "$rep" && grep -Eq "^- skill-audit-.*・直してよい・" "$rep"'
 
-echo "== スキルの削除と参照の修正を1件にまとめ、行き先の表を付ける"
-mkdir -p "$R/eps"
-printf 'eps 決まり\n' >"$R/eps/SKILL.md"
-printf 'beta\nline2\n- eps を使う\n' >"$R/beta/SKILL.md"
-printf '# 規則\n\n- 既存\n' >"$HOME/.claude/CLAUDE.md"
-alpha_before="$(cat "$R/alpha/SKILL.md")"
-ls "$PDIR"/*.md | sort >"$WORK/props-before"
-export HOME
-HOOK_DEST='DEST="$(grep -o "[^ ]*/destinations の下のフォルダに書く" "$FAKE_ARGS" | head -1)"; DEST="${DEST%% の下*}" &&
-D="$DEST$R/eps" && mkdir -p "$D" &&
-"$SCRIPT_DIR/trash-skill.sh" eps >/dev/null &&
-printf "beta\nline2\n" >"$R/beta/SKILL.md" &&
-printf "added directly\n" >>"$R/alpha/SKILL.md" &&
-printf "| No | 消える記述 | 行き先 | 場所 |\n| --- | --- | --- | --- |\n| 1 | eps の決まり | 記載なし → この案で移す | 移し先 \`$HOME/.claude/CLAUDE.md\`（規則） |\n| 2 | eps の索引 | 記載なし → この案で移す | 移し先 \`$R/alpha/SKILL.md\`（末尾） |\n" >"$D/table.md" &&
-printf "# 規則\n\n- 既存\n- eps の決まり\n" >"$D/CLAUDE.md" &&
-{ cat "$R/alpha/SKILL.md" | sed "\$d"; printf "eps の索引\n"; } >"$D/alpha.md" &&
-printf "%s\t%s\n" "$HOME/.claude/CLAUDE.md" CLAUDE.md "$R/alpha/SKILL.md" alpha.md >"$D/moves.tsv"'
-CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK_DEST" "$SCRIPT_DIR/run-audit.sh" --force
-rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "依頼文に行き先の表の書き方と、参照の修正をまとめることを含む" 'grep -Fq "| No | 消える記述 | 行き先 | 場所 |" "$FAKE_ARGS" && grep -Fq "そのスキルを参照する他の箇所の修正も同じ実行の中で行う" "$FAKE_ARGS"'
-check "行き先のフォルダへの書き込みを許可する" 'grep -q "^Edit(/.*/destinations/\*\*)$" "$FAKE_ARGS"'
-new_props="$(ls "$PDIR"/*.md | sort | comm -13 "$WORK/props-before" -)"
-printf '%s\n' "$new_props"
-check "承認待ちは1件だけ増える（参照の修正を別の案にしない）" '[ "$(printf "%s\n" "$new_props" | grep -c .)" = "1" ]'
-p_eps="$new_props"
-check "スキルの削除の案に参照の修正の差分が入る" 'grep -Fxq "  - $R/eps" "$p_eps" && grep -Fxq "  - $R/beta/SKILL.md" "$p_eps" && grep -Fxq -- "--- $R/beta/SKILL.md" "$p_eps" && grep -Fxq -- "-- eps を使う" "$p_eps"'
-check "スキルの削除の案に行き先の表と移し先への追加の差分が入る" 'grep -Fxq "## 消える記述の行き先" "$p_eps" && grep -Fq "| 1 | eps の決まり | 記載なし → この案で移す |" "$p_eps" && grep -Fxq "  - $HOME/.claude/CLAUDE.md" "$p_eps" && grep -Fxq "+- eps の決まり" "$p_eps" && grep -Fxq "+eps の索引" "$p_eps" && grep -q "^# eps の削除（skill-audit の自動の精査）$" "$p_eps"'
-check "削除したスキルと参照の修正は戻る" '[ -f "$R/eps/SKILL.md" ] && [ "$(cat "$R/beta/SKILL.md")" = "beta${NL}line2${NL}- eps を使う" ]'
-check "移し先へは自動で書き足さない" '[ "$(cat "$HOME/.claude/CLAUDE.md")" = "# 規則${NL}${NL}- 既存" ]'
-check "移し先を直接書き換えていたら戻す" '[ "$(cat "$R/alpha/SKILL.md")" = "$alpha_before" ] && grep -Fq "$R/alpha/SKILL.md\`: 行き先の表の移し先を直接書き換えていた" "$HF"'
-rm -rf "$R/eps" "$HF"
-printf 'beta\nline2\n' >"$R/beta/SKILL.md"
+# 元の対象に対する南京錠を、自作のリンクの実体にも付ける。
+echo "== 自作のスキルのリンクも元の実体を直さない"
+mkdir -p "$WORK/own/own-link"
+printf 'own old\n' >"$WORK/own/own-link/SKILL.md"
+ln -s "$WORK/own/own-link" "$R/own-link"
+out="$(SKILL_AUDIT_OWN_LINK_ROOTS="$WORK/own" "$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
+allow_part="$(printf '%s' "$out" | sed -n "s/.*'--allowedTools'\(.*\)'--disallowedTools'.*/\1/p")"
+deny_part="${out#*--disallowedTools}"
+check "リンクの実体は拒否側にだけ出す" 'printf "%s" "$deny_part" | grep -Fq "Edit(/$WORK/own/own-link/**)" && ! printf "%s" "$allow_part" | grep -Fq "Edit(/$WORK/own/own-link/**)"'
+SKILL_AUDIT_OWN_LINK_ROOTS="$WORK/own" CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK='printf "own old\nadded\n" >"$STAGE/own-link/SKILL.md"' "$SCRIPT_DIR/run-audit.sh" --force; rc=$?
+check "元のリンクと実体を保つ" '[ "$rc" -eq 0 ] && [ -L "$R/own-link" ] && [ "$(cat "$WORK/own/own-link/SKILL.md")" = "own old" ]'
+check "自作のリンクの追加も記録する" 'entry_for "$R/own-link/SKILL.md" | grep -Fxq "+added"'
+rm "$R/own-link"
 
-echo "== 承認が要らない修正と削除は残し、ID と直す前の版を記録する"
-mkdir -p "$R/zeta" "$R/security-rules" "$R/eta"
-printf 'zeta\nold rule\n' >"$R/zeta/SKILL.md"
-printf 'zeta ref\n' >"$R/zeta/ref.md"
-printf 'sec\nrule\n' >"$R/security-rules/SKILL.md"
-printf 'eta\n' >"$R/eta/SKILL.md"
-printf 'beta\nline2\n- eta を使う\n' >"$R/beta/SKILL.md"
-printf 'alpha\nkeep\n' >"$R/alpha/SKILL.md"
-"$SCRIPT_DIR/run-audit.sh" --force
-# alpha の修正は、同じ種類が2回訂正されているため承認待ちに回る。
-bash "$CHANGE_REVIEW_SCRIPTS/corrections.sh" add --id skill-audit-2000-01-01-000000-01 --kind skill-audit/修正/alpha --target "$R/alpha/SKILL.md" --correct "正しくは keep の行を残す" >/dev/null
-bash "$CHANGE_REVIEW_SCRIPTS/corrections.sh" add --id skill-audit-2000-01-08-000000-01 --kind skill-audit/修正/alpha --target "$R/alpha/SKILL.md" --correct "正しくは keep の行を消さない" >/dev/null
-ls "$PDIR"/*.md | sort >"$WORK/props-before"
-HOOK_AUTO='printf "zeta\nnew rule\n" >"$R/zeta/SKILL.md" &&
-rm "$R/zeta/ref.md" &&
-printf "sec\n" >"$R/security-rules/SKILL.md" &&
-printf "alpha\n" >"$R/alpha/SKILL.md" &&
-"$SCRIPT_DIR/trash-skill.sh" eta >/dev/null &&
-printf "beta\nline2\n" >"$R/beta/SKILL.md"'
-CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK_AUTO" "$SCRIPT_DIR/run-audit.sh" --force
-rc=$?
-day="$(date '+%Y-%m-%d')"
-run_id="$(ls -1d "$SKILL_AUDIT_STATE/runs/"*/ | LC_ALL=C sort | tail -1)"; run_id="${run_id%/}"; run_id="${run_id##*/}"
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "承認の要らない修正は残る" '[ "$(cat "$R/zeta/SKILL.md")" = "zeta${NL}new rule" ]'
-check "承認の要らないファイルの削除は残る" '[ ! -e "$R/zeta/ref.md" ]'
-check "承認の要らないスキルの削除は残る（退避先にある）" '[ ! -e "$R/eta" ] && [ -f "$(ls -d "$R/.skill-audit-trash/"*-eta | head -1)/SKILL.md" ]'
-check "削除したスキルを参照する箇所の修正も残る" '[ "$(cat "$R/beta/SKILL.md")" = "beta${NL}line2" ]'
-check "直す前の版を history/<日付>/ に複製する" '[ "$(cat "$HD/$day/zeta__SKILL.md.bak")" = "zeta${NL}old rule" ] && [ "$(cat "$HD/$day/zeta__ref.md.bak")" = "zeta ref" ] && [ -f "$HD/$day/eta__skill/SKILL.md" ]'
-check "安全のための規則のスキルの修正は戻して承認待ち" '[ "$(cat "$R/security-rules/SKILL.md")" = "sec${NL}rule" ]'
-check "2回訂正された種類の修正は戻して承認待ち" '[ "$(cat "$R/alpha/SKILL.md")" = "alpha${NL}keep" ]'
-new_props="$(ls "$PDIR"/*.md | sort | comm -13 "$WORK/props-before" -)"
-check "承認待ちは2件" '[ "$(printf "%s\n" "$new_props" | grep -c .)" = "2" ]'
-check "承認待ちの理由に判定の根拠を書く" 'grep -Fq "安全のための規則のスキル（security-rules）の修正である" $new_props && grep -Fq "skill-audit/修正/alpha）が訂正リストで 2 回訂正されている" $new_props'
-hist="$(cat "$HF")"
-check "history.md に ID・種類・戻し方を書く" 'printf "%s" "$hist" | grep -Fq -- "- skill-audit-${run_id}-" && printf "%s" "$hist" | grep -Fq "\`$R/zeta/SKILL.md\`（修正。種類 \`skill-audit/修正/zeta\`。直す前の版 \`$HD/$day/zeta__SKILL.md.bak\`）" && printf "%s" "$hist" | grep -Fq "\`$R/zeta/ref.md\`（削除。種類 \`skill-audit/削除/zeta\`。" && printf "%s" "$hist" | grep -Fq "\`$R/eta\`（削除。種類 \`skill-audit/削除/eta\`。退避先 \`$R/.skill-audit-trash/"'
-res="$(ls -t "$HOME/claude-reports/skill-audit/"*.md | head -1)"
-check "結果のファイルに承認なしで反映した変更を ID 付きで載せる" 'grep -Fq "\`$R/zeta/SKILL.md\`（修正。" "$res" && grep -Fq "訂正リスト（$PDIR/corrections.md）" "$res" && grep -Fq "承認待ちにした変更 2件" "$res"'
-check "結果のファイルに戻し方（revert.sh）を書く" 'grep -Fq "scripts/revert.sh に ID を渡す（変更の台帳 $CLAUDE_CHANGE_LEDGER から" "$res"'
+echo "== 新規のトップレベル項目も対象範囲を守る"
+before_n="$(grep -c '^## ' "$CLAUDE_REVIEW_CHANGES_LOG")"
+HOOK='mkdir -p "$STAGE/linked" "$STAGE/incomplete" &&
+printf "outside candidate\n" >"$STAGE/linked/SKILL.md" &&
+printf "single file\n" >"$STAGE/single.md" &&
+printf "no skill file\n" >"$STAGE/incomplete/ref.md" &&
+ln -s "$WORK/external/linked" "$STAGE/new-link"'
+CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK" "$SCRIPT_DIR/run-audit.sh" --force; rc=$?
+check "対象外のリンクと同名のスキル候補を記録しない" '[ "$rc" -eq 0 ] && ! grep -Fq -- "--- $R/linked/SKILL.md" "$CLAUDE_REVIEW_CHANGES_LOG"'
+check "単独ファイル・SKILL.mdなし・リンクの新規項目を記録しない" '[ "$(grep -c "^## " "$CLAUDE_REVIEW_CHANGES_LOG")" = "$before_n" ]'
+check "元の対象外リンクの実体を変更しない" '[ -L "$R/linked" ] && [ "$(cat "$WORK/external/linked/SKILL.md")" = linked ]'
+rep="$(ls -t "$HOME/claude-reports/skill-audit/"*.md | head -1)"
+check "同名の対象外項目を拒否した理由を結果へ載せる" 'grep -Fq "対象外の項目と同名" "$rep"'
+check "新規スキルの条件に合わない理由を結果へ載せる" 'grep -Fq "非リンクディレクトリと SKILL.md がそろっていない" "$rep"'
 
-echo "== 変更の台帳に記録し、ID を渡して戻せる"
-zid="$(printf '%s\n' "$hist" | sed -n "s|^ *- \(skill-audit-[^:]*\): \`$R/zeta/SKILL.md\`.*|\1|p")"
-eid="$(printf '%s\n' "$hist" | sed -n "s|^ *- \(skill-audit-[^:]*\): \`$R/eta\`.*|\1|p")"
-check "台帳に ID ごとのコミットがある" '[ -n "$zid" ] && [ -n "$eid" ] && git -C "$CLAUDE_CHANGE_LEDGER" log --format=%s | grep -q "^record: $zid skill-audit/修正/zeta " && git -C "$CLAUDE_CHANGE_LEDGER" log --format=%s | grep -q "^record: $eid skill-audit/削除/eta "'
-check "台帳に直す前と直した後の版を写す" '[ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$zid/1/before")" = "zeta${NL}old rule" ] && [ "$(cat "$CLAUDE_CHANGE_LEDGER/entries/$zid/1/after")" = "zeta${NL}new rule" ] && [ -f "$CLAUDE_CHANGE_LEDGER/entries/$eid/1/before/SKILL.md" ]'
-out="$(bash "$CHANGE_REVIEW_SCRIPTS/revert.sh" "$zid" 2>&1)"; rc=$?
-check "修正を戻す" '[ "$rc" -eq 0 ] && [ "$(cat "$R/zeta/SKILL.md")" = "zeta${NL}old rule" ] && printf "%s" "$out" | grep -Fq "corrections.sh add --id $zid --kind skill-audit/修正/zeta"'
-bash "$CHANGE_REVIEW_SCRIPTS/revert.sh" "$eid" >/dev/null 2>&1; rc=$?
-check "スキルの削除を戻す" '[ "$rc" -eq 0 ] && [ "$(cat "$R/eta/SKILL.md")" = "eta" ]'
-mv "$(ls -d "$R/.skill-audit-trash/"*-eta | head -1)" "$WORK/eta-trashed"
-rm -rf "$R/zeta" "$R/eta" "$R/security-rules" "$HF" "$HOME/claude-reports"
-printf 'beta\nline2\n' >"$R/beta/SKILL.md"
-printf 'alpha\n' >"$R/alpha/SKILL.md"
+echo "== needs-approval・訂正2回・移し先の欠け"
+printf 'twice old\n' >"$R/alpha/twice.md"
+printf 'needs old\n' >"$R/alpha/needs.md"
+printf 'missing old\n' >"$R/beta/missing.md"
+for id in old-1 old-2; do
+  bash "$CHANGE_REVIEW_SCRIPTS/corrections.sh" add --id "$id" --kind skill-audit/修正/alpha --target "$R/alpha/twice.md" --correct '正しくは元の記述を残す' >/dev/null
+done
+HOOK='printf "twice new\n" >"$STAGE/alpha/twice.md" && printf "needs new\n" >"$STAGE/alpha/needs.md" && printf "missing new\n" >"$STAGE/beta/missing.md" && printf "%s\t%s\n" "$R/alpha/needs.md" "判断に迷う" >"$RUN_DIR/needs-approval.tsv" &&
+for name in twice.md needs.md; do
+D="$DEST$R/alpha/$name"; mkdir -p "$D"
+printf "| No | 消える記述 | 行き先 | 場所 |\n| --- | --- | --- | --- |\n| 1 | 古い経緯 | 決まりではない（経緯の記録） | — |\n" >"$D/table.md"
+done'
+CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK="$HOOK" "$SCRIPT_DIR/run-audit.sh" --force; rc=$?
+check "判定して正常終了" '[ "$rc" -eq 0 ]'
+check "訂正2回は要確認" 'entry_for "$R/alpha/twice.md" | grep -Fq "区分: 要確認（同じ種類"'
+check "needs-approval の理由は要確認" 'entry_for "$R/alpha/needs.md" | grep -Fq "判断に迷う"'
+check "表の欠けは要確認" 'entry_for "$R/beta/missing.md" | grep -q "^- 区分: 要確認（"'
+check "3件とも元のファイルを直さない" '[ "$(cat "$R/alpha/twice.md")" = "twice old" ] && [ "$(cat "$R/alpha/needs.md")" = "needs old" ] && [ "$(cat "$R/beta/missing.md")" = "missing old" ]'
 
-echo "== 承認あり（screen）では修正と削除をすべて承認待ちにする"
-"$SCRIPT_DIR/run-audit.sh" --force
-ls "$PDIR"/*.md | sort >"$WORK/props-before"
-CLAUDE_REVIEW_APPROVAL_MODE=screen CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK='printf "beta\nline2 screen\n" >"$R/beta/SKILL.md" && printf "added\n" >>"$R/alpha/SKILL.md"' "$SCRIPT_DIR/run-audit.sh" --force
-new_props="$(ls "$PDIR"/*.md | sort | comm -13 "$WORK/props-before" -)"
-check "修正は戻して承認待ちにする" '[ "$(cat "$R/beta/SKILL.md")" = "beta${NL}line2" ] && [ "$(printf "%s\n" "$new_props" | grep -c .)" = "1" ] && grep -Fq "承認ありの設定（CLAUDE_REVIEW_APPROVAL_MODE=screen）" $new_props'
-check "追加だけの変更は残る" '[ "$(cat "$R/alpha/SKILL.md")" = "alpha${NL}added" ]'
-rm -rf "$HF" "$HOME/claude-reports"
-printf 'alpha\n' >"$R/alpha/SKILL.md"
+echo "== リンクをたどる削除の候補は拒否する"
+CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK='printf "%s\t%s\n" "$R/alpha/link-dir/linked" "対象外" >"$RUN_DIR/deletions.tsv"' "$SCRIPT_DIR/run-audit.sh" --force; rc=$?
+check "削除の候補でリンク先を消さない" '[ "$rc" -eq 0 ] && [ -f "$WORK/external/linked/SKILL.md" ]'
 
-echo "== change-review が見つからなくても修正は戻す"
-printf "beta\nline2\n" >"$R/beta/SKILL.md"
-n_before="$(ls "$PDIR" | wc -l | tr -d " ")"
-# core/skills の中では隣に change-review があるため、隣に書き換えを拒否する規則の部品（link-scopes.sh）だけを置いた場所へ
-# 複製した scripts で試す。
-mkdir -p "$WORK/isolated/skill-audit" "$WORK/isolated/change-review/scripts" && cp -Rp "$SCRIPT_DIR" "$WORK/isolated/skill-audit/scripts"
-cp -p "$CHANGE_REVIEW_SCRIPTS/link-scopes.sh" "$WORK/isolated/change-review/scripts/"
-CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK='echo x >"$R/beta/SKILL.md"' "$WORK/isolated/skill-audit/scripts/run-audit.sh" --force
-check "修正は戻る" '[ "$(cat "$R/beta/SKILL.md")" = "beta${NL}line2" ]'
-check "承認待ちは増えない" '[ "$(ls "$PDIR" | wc -l | tr -d " ")" = "$n_before" ]'
-check "history.md に作れなかったことを書く" 'grep -Fq "Skill change-review が見つからず承認待ちを作れなかった" "$HF"'
-check "history.md が無ければ冒頭の説明と区切りを作る" '[ "$(head -1 "$HF")" = "# スキルの変更履歴" ] && grep -qx -- "---" "$HF"'
-check "スキル置き場に history を作らない" '[ ! -e "$R/skill-audit/history.md" ] && [ ! -e "$R/skill-audit/history" ]'
-rm -f "$HF"
-
-echo "== 書き換えを拒否する規則の部品（link-scopes.sh）が無ければ起動しない"
-mkdir -p "$WORK/bare/skill-audit" && cp -Rp "$SCRIPT_DIR" "$WORK/bare/skill-audit/scripts"
+echo "== 必要なスクリプトが無ければ起動しない"
+mkdir -p "$WORK/bare/skill-audit"
+cp -Rp "$SCRIPT_DIR" "$WORK/bare/skill-audit/scripts"
 rm -f "$FAKE_ARGS"
-CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" CLAUDE_LAUNCHER="$FAKE" FAKE_HOOK=true "$WORK/bare/skill-audit/scripts/run-audit.sh" --force
-rc=$?
-check "終了コード1（rc=${rc}）" '[ "$rc" -eq 1 ]'
-check "claude を起動しない" '[ ! -f "$FAKE_ARGS" ]'
-check "ログに理由が書かれる" 'grep -q "link-scopes.sh を読み込めません" "$(ls -1t "$SKILL_AUDIT_STATE/logs/"*.log | head -1)"'
-# 後片付けの後の状態で last-hash を取り直す。
-"$SCRIPT_DIR/run-audit.sh" --force
+CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" CLAUDE_LAUNCHER="$FAKE" "$WORK/bare/skill-audit/scripts/run-audit.sh" --force; rc=$?
+check "規則が無ければ終了コード1" '[ "$rc" -eq 1 ]'
+check "Claude を起動しない" '[ ! -f "$FAKE_ARGS" ]'
+mkdir -p "$WORK/bare/change-review/scripts"
+cp "$CHANGE_REVIEW_SCRIPTS/link-scopes.sh" "$WORK/bare/change-review/scripts/"
+CHANGE_REVIEW_SCRIPTS="$WORK/nosuch" CLAUDE_LAUNCHER="$FAKE" "$WORK/bare/skill-audit/scripts/run-audit.sh" --force; rc=$?
+check "記録のスクリプトが無くても起動しない" '[ "$rc" -eq 1 ] && [ ! -f "$FAKE_ARGS" ]'
 
+# hash の基準を、利用者が作ったファイルを含む今の状態へ進める。
+"$SCRIPT_DIR/run-audit.sh" --force
 echo "== 変更検出の範囲"
 echo "new" >"$HD/2000-01-01/y.bak"
 echo "x" >"$R/synced/x/new.md"
@@ -387,7 +286,7 @@ out="$(env -u SKILL_AUDIT_EXCLUDE "$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
 check "除外の指定が無ければ名前で除外しない" '! printf "%s" "$out" | grep -Fq "Edit(/$R/plugins/**)"'
 printf 'SKILL_AUDIT_ROOT=%s\nSKILL_AUDIT_EXCLUDE=plugins\n' "$R" >"$CLAUDE_REVIEW_JOBS_CONF"
 out="$(env -u SKILL_AUDIT_ROOT -u SKILL_AUDIT_EXCLUDE "$SCRIPT_DIR/run-audit.sh" --dry-run --force)"
-check "設定ファイルの ROOT と除外の名前を使う" 'printf "%s" "$out" | grep -Fq "cd '"'"'$R'"'"' &&" && printf "%s" "$out" | grep -Fq "Edit(/$R/plugins/**)" && ! printf "%s" "$out" | grep -Fq "Edit(/$R/vendored/**)"'
+check "設定ファイルの ROOT と除外の名前を使う" 'printf "%s" "$out" | grep -Fq "Edit(/$R/plugins/**)" && ! printf "%s" "$out" | grep -Fq "Edit(/$R/vendored/**)"'
 rm -f "$CLAUDE_REVIEW_JOBS_CONF"
 mkdir -p "$WORK/alias-home/.claude"
 ln -s "$R" "$WORK/alias-home/.claude/skills"

@@ -4,7 +4,7 @@
 #         list.sh --failures
 #         list.sh --proposals
 #   --unread    未読のものだけを出す
-#   --proposals 承認待ち（status が pending）を「id / 見出し / targets」の形で id の昇順に出す
+#   --proposals 未対応の直したいことを「id / 見出し / targets」の形で id の昇順に出す
 #   --failures  未読の失敗の知らせを「ジョブ名 / 日時 / パス」の形で出し、続けて ERROR の行を先頭3行まで字下げして出す
 set -u
 
@@ -18,7 +18,7 @@ for arg in "$@"; do
   case "$arg" in
     --unread) unread_only=1 ;;
     --failures) failures=1 ;;
-    --proposals) proposals=1 ;;
+    --changes|--proposals) proposals=1 ;;
     *) printf 'ERROR: 不明な引数です: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -28,7 +28,7 @@ if [ $((failures + proposals + unread_only)) -gt 1 ]; then
 fi
 
 if [ "$proposals" -eq 1 ]; then
-  list_pending_proposals | while IFS="$TAB" read -r pid head targets; do
+  list_pending_changes | while IFS="$TAB" read -r pid head targets; do
     printf '%s / %s / %s\n' "$pid" "$head" "$targets"
   done
   exit 0

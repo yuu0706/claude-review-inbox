@@ -9,7 +9,7 @@ Skill `skill-audit` を週1回、非対話で起動するためのスクリプ�
 | `lib.sh` | 共通定義（`ROOT`、`STATE_DIR`、除外名の配列 `EXCLUDE_NAMES`、`list_targets`、jobs.conf の読み込み、設定ディレクトリの一覧）。各スクリプトが source する |
 | `snapshot.sh <スキル名> <相対パス>` | 修正前のファイルを `STATE_DIR/history/<YYYY-MM-DD>/<スキル名>__<相対パス>.bak` へ退避する。同日の2回目以降は上書きしない |
 | `trash-skill.sh <スキル名>` | スキルのディレクトリを `ROOT/.skill-audit-trash/<YYYY-MM-DD-HHMMSS>-<スキル名>/` へ移動する。削除はしない |
-| `run-audit.sh [--force] [--dry-run]` | 変更を検出し、権限を絞った `claude` で精査を起動する。実行の前後を比べ、変更ごとに承認が要るかを判定し、要らないものは残して記録し、要るものは戻して承認待ちにする |
+| `run-audit.sh [--force] [--dry-run]` | 変更を検出し、権限を絞った `claude` で精査を起動する。作業用の複製で差分を作り、追加・修正・削除・統合を記録へ足す。元の対象は変更しない |
 | `check-public.sh` | 公開版のディレクトリの一覧（`public-dirs.txt`）の各ディレクトリを共通の検査器の `check.sh` で調べ、当たり・失敗・検査器が無いことを `~/claude-reports/skill-audit/<YYYY-MM-DD>.md` に書く。`run-audit.sh` が `--dry-run` 以外で毎回呼ぶ。公開版は直さない |
 | `test.sh` | 一時ディレクトリに偽の ROOT を作って上記を検査する。実際の claude は起動しない |
 
@@ -25,13 +25,13 @@ Skill `skill-audit` を週1回、非対話で起動するためのスクリプ�
 | `CLAUDE_REVIEW_CONFIG_DIRS` | `$HOME/.claude` | Claude の設定ディレクトリの一覧（コロン区切り）。存在するものだけを使う |
 | `CLAUDE_REVIEW_DENY_READ` | なし | 読み取りを拒否する追加の場所（コロン区切り） |
 | `CLAUDE_REVIEW_JOBS_CONF` | `${XDG_CONFIG_HOME:-~/.config}/claude-review-inbox/jobs.conf` | 共通の設定ファイル。`SKILL_AUDIT_ROOT`・`SKILL_AUDIT_EXCLUDE`・`SKILL_AUDIT_OWN_LINK_ROOTS`・`CLAUDE_LAUNCHER`・`CLAUDE_REVIEW_CONFIG_DIRS`・`CLAUDE_REVIEW_DENY_READ` を `名前=値` の形で書ける。環境変数が優先する |
-| `CLAUDE_REVIEW_PROPOSALS` | `${CLAUDE_REPORTS_ROOT:-$HOME/claude-reports}/proposals` | 承認待ちの置き場所。否認リスト `rejections.md` と訂正リスト `corrections.md` もここにある |
-| `SKILL_AUDIT_PROTECTED` | `security-rules commit-guard` | 修正・削除を常に承認待ちに回すスキル（安全のための規則。空白区切り）。claude の書き換えも、リンクの表記と実体の両方で拒否する。jobs.conf にも書ける |
+| `CLAUDE_REVIEW_PROPOSALS` | `${CLAUDE_REPORTS_ROOT:-$HOME/claude-reports}/proposals` | 否認リスト`rejections.md`と訂正リスト`corrections.md`の置き場所 |
+| `SKILL_AUDIT_PROTECTED` | `security-rules commit-guard` | 修正・削除を常に`要確認`にするスキル（安全のための規則。空白区切り）。claude の書き換えも、リンクの表記と実体の両方で拒否する。jobs.conf にも書ける |
 | `CLAUDE_REVIEW_GUARDED_PATHS` | 各スキルの `scripts/`（`security-rules`・`memory-audit`・`report-inbox`・`repo-patrol`・`secret-patrol`・`skill-audit`・`feedback-mining`・`change-review`） | claude の書き換えを拒否するフックと定期実行のスクリプト（コロン区切り。スキルの置き場所からの相対パスか絶対パス）。jobs.conf にも書ける |
-| `CLAUDE_REVIEW_APPROVAL_MODE` | `screen` | 承認の進め方。`screen`（承認あり）では修正・削除をすべて承認待ちにし、`auto`（承認なし）では承認が要るものだけを承認待ちにする。jobs.conf にも書ける |
-| `CLAUDE_CHANGE_LEDGER` | `$HOME/.local/state/claude-change-ledger` | 変更の台帳（Skill `change-review` の `ledger.sh`）。承認なしで反映した変更の直す前と直した後の版をコミットする。claude の書き込みを拒否する。jobs.conf にも書ける |
+| `CLAUDE_CHANGE_LEDGER` | `$HOME/.local/state/claude-change-ledger` | 過去の変更の台帳。新しい記録には使わない。claude の書き込みを拒否する。jobs.conf にも書ける |
+| `CLAUDE_REVIEW_CHANGES_LOG` | `$HOME/.local/state/claude-reports/changes/log.md` | 直したいことの記録。シェルが追記し、Claudeの直接編集は拒否する |
 | `CLAUDE_REPORTS_ROOT` | `$HOME/claude-reports` | 結果の置き場所の親。結果は `<ここ>/skill-audit/<YYYY-MM-DD>.md` に書く |
-| `CLAUDE_REVIEW_STATE` | `$HOME/.local/state/claude-review-inbox` | 判断の台帳の置き場所。claude の書き込みを拒否する |
+| `CLAUDE_REVIEW_STATE` | `$HOME/.local/state/claude-review-inbox` | 旧版から残る状態の置き場所。claude の書き込みを拒否する |
 | `CHANGE_REVIEW_SCRIPTS` | なし | Skill `change-review` の scripts の場所。無ければ `<このスクリプトの場所>/../../change-review/scripts`、`ROOT/change-review/scripts`、各設定ディレクトリの `skills/change-review/scripts` の順に探す |
 
 利用者の環境だけの決まりは、上書きファイル `${XDG_CONFIG_HOME:-~/.config}/claude-skills/skill-audit.local.md` に書く。`run-audit.sh` は、このファイルの Read を許可し、依頼文で場所を伝える。
@@ -44,31 +44,48 @@ ROOT 直下のディレクトリのうち、次を除いたものを対象とす
 - `SKILL_AUDIT_EXCLUDE` に挙げた名前（既定は無し）
 - シンボリックリンクのうち、実体が `OWN_LINK_ROOTS`（環境変数 `SKILL_AUDIT_OWN_LINK_ROOTS`、コロン区切り。既定は本リポジトリの `core/skills`）の下に無いもの。実体がその下にあるリンクは自作のスキルとして対象にし、実体の中身を複製・比較する。`trash-skill.sh` はリンクのスキルを移動しない
 
-`claude -p` の権限はリンクをたどった先の実体のパスで判定される。そのため、スキルの置き場所の直下にあるリンクの実体には `Read(/<実体>/**)` を、対象のリンクの実体には `Edit(/<実体>/**)` を許可し、対象外のリンクの実体の `Edit` と、`CLAUDE.md`・`settings.json` 等の実体の `Edit` を拒否する。実体の列挙は `core/skills/change-review/scripts/link-scopes.sh` で行う。
+`claude -p`は元のROOTとリンク先の実体を読み取り専用とする。
+編集は作業用の複製と、行き先の表・`needs-approval.tsv`だけに許可する。
+元のROOT、設定、否認リストと訂正リスト、旧版の状態、過去の台帳、変更の記録は書き換えを拒否する。
+安全のための規則とフック・定期実行のスクリプトは、リンクの表記と実体の両方を守る。
+`link-scopes.sh`が権限を組み立て、作れなければ起動しない。
+`--permission-mode default`を使う。
+読み取りは同期フォルダと`CLAUDE_REVIEW_DENY_READ`の各場所を拒否する。
 
-Bash の許可は文字列の前方一致で判定される。そのため `snapshot.sh` と `trash-skill.sh` は、実体のパス・`ROOT/skill-audit/scripts/` を経由したパス・各設定ディレクトリの `skills` を経由したパス（`~` を展開した形）・`ROOT` からの相対パス（`skill-audit/scripts/...` と `./skill-audit/scripts/...`）の各形を許可する。依頼文では `ROOT/skill-audit/scripts/` の下の絶対パスを渡し、そのとおりに呼ばせる。実体のパスだけを許可すると、リンクの側のパスで呼んだ `snapshot.sh` が許可待ちで止まる。
+`snapshot.sh`と`trash-skill.sh`は会話で実際に直すために残す。
+定期実行は元のスキルをこれらのスクリプトで変更しない。
+`history.md`と直す前の複製は過去の記録として残す。
+定期実行は`history.md`へ反映の記録を足さない。
 
-設定ディレクトリの `skills` が ROOT へのリンクなら、そちらの表記でも対象外のディレクトリの `Edit` を拒否する。読み取りは `~/Library/CloudStorage` と `CLAUDE_REVIEW_DENY_READ` の各場所を拒否する。
+## run-audit.shの動作
 
-変更の記録（`STATE_DIR/history.md`）と直す前の複製（`STATE_DIR/history/`）は ROOT の外にあるため、変更検出と比較の対象に入らない。claude には `Read(/STATE_DIR/history/**)`、`Read(/STATE_DIR/history.md)`、`Edit(/STATE_DIR/history.md)` を許可する。
+1. `STATE_DIR/lock`をmkdirで取り、二重起動なら終了コード1で終わる。終了時に消す。
+2. 通常実行の出力を`STATE_DIR/logs/<YYYY-MM-DD-HHMMSS>.log`へ書く。30件を超えた古いログは削除する。
+3. 対象のsha256を`last-hash`と比べる。同じで`--force`が無ければ精査を省略する。
+4. 元のスキルを`STATE_DIR/runs/<日時>/before/`と同じ階層の`staging/`へ複製する。作業用のフォルダと権限を用意する。
+5. `CLAUDE_LAUNCHER`で精査を起動する。元のパスと作業用のパス、否認リストと訂正リスト、上書きファイルの場所を伝える。
+6. 作業用の差分から追加・修正・削除・統合を取り出す。追加は`new-change.sh`、修正・削除は`propose.sh`で記録する。
+7. 結果の「記録に足した直したいこと」にID・区分・対象・要約を書く。公開版の点検の結果があれば同じファイルへ足す。
+8. 正常終了した場合だけ`last-hash`を更新する。
 
-## run-audit.sh の動作
+新規スキルは、元の置き場所に同名の項目が無く、作業用の非リンクディレクトリに`SKILL.md`がある場合だけ記録する。
+対象外の既存項目と同名の候補や、単独のファイルを新規スキルとして扱わない。
 
-1. `STATE_DIR/lock` を mkdir で作り、作れなければ二重起動として終了コード1で終わる。終了時に消す。
-2. 通常実行では、以降の出力を `STATE_DIR/logs/<YYYY-MM-DD-HHMMSS>.log` へ書く。30件を超えた古いログは削除する。
-3. 対象配下の全ファイルから sha256 を計算し、`STATE_DIR/last-hash` と同じで `--force` が無ければ「変更なし」と書いて終了コード0で終わる。
-4. 許可と拒否の規則を組み立てる。拒否には承認待ちの置き場所と判断の台帳への `Edit` を含める。南京錠として、`change-review/scripts/link-scopes.sh` の `guard_deny_rules` が出す規則（`SKILL_AUDIT_PROTECTED` のスキル全体・`CLAUDE_REVIEW_GUARDED_PATHS` のスクリプト・各設定ディレクトリの `CLAUDE.md`・`settings.json`・`settings.local.json`・変更の台帳を、リンクの表記と実体のパスの両方で）も拒否に入れる。拒否の規則は許可の規則より優先するため、自作のスキルの実体に `Edit` を許可していても、その中の `scripts/` は書き換えられない。`link-scopes.sh` を読み込めなければ、規則を作れないため起動せずに終了コード1で終わる。`--permission-mode default` を付け、settings.json の `defaultMode`（acceptEdits 等）で作業場所の中の編集が通らないようにする。行き先の表を書く `STATE_DIR/runs/<日時>/destinations/` への `Read` と `Edit`、承認が要る変更の一覧 `STATE_DIR/runs/<日時>/needs-approval.tsv` への `Edit` は許可する。依頼文に訂正リストの場所と `needs-approval.tsv` の書き方を足す。`change-review` が見つかれば、依頼文に行き先の表と移し先の書き方（`destinations.sh --print-rule` の出力）を足す。
-5. 対象のスキル群を `STATE_DIR/runs/<日時>/before/` へ複製する（10回分を残す）。`.skill-audit-trash/` の中身の一覧も控える。
-6. cwd を ROOT にして `CLAUDE_LAUNCHER`（既定 `claude`）を起動する。起動に使うコマンドをログに書く。依頼文で否認リストと上書きファイルのパスを渡す。
-7. 終了コードによらず、実行の前後を比べ、変更ごとに承認が要るかを判定する（`approval_reason`）。承認が要るのは、`needs-approval.tsv` の1列目が対象そのもの（またはそれを含むスキルのディレクトリ）に一致するもの、`change-review/scripts/corrections.sh count skill-audit/<追加|修正|削除>/<スキル名>` が2以上のもの、`SKILL_AUDIT_PROTECTED` のスキルの修正・削除、差分の `-` 行が `permissions.deny`・`gitleaks`・`秘密の検査` を含むもの、行き先のフォルダに `moves.tsv` があるか `table.md` に「（候補なし）」があるもの、承認の進め方が `screen`（承認あり。既定）のときの修正・削除である。`change-review` が見つからなければ、修正と削除は承認が要るとみなす（追加は残す）。
-   - 承認が要らない変更・新しいファイル・新しいスキルは残す。ID（`skill-audit-<実行の日時>-<連番>`）を振り、直す前の版を `STATE_DIR/history/<日付>/<スキル名>__<相対パスの / を _ にした名前>.bak`（スキルの削除は `<スキル名>__skill/`）へ複製する（既にあれば最初の版を残す）。あわせて `change-review/scripts/ledger.sh record` で、直す前と直した後の版を変更の台帳にコミットする（記録に失敗したら `history.md` の注意に書く）。
-   - 承認が要る修正・ファイルの削除は、`change-review/scripts/diff-label.sh` で差分を作ってから実行前の版に戻し、`propose.sh` で承認待ちを1件ずつ作る。理由に判定の根拠を書く。
-   - 承認が要るスキルの削除は、実行中に `.skill-audit-trash/` へ移されたものを元の場所へ戻し（無ければ複製から戻す）、全ファイルの削除の差分を1件の承認待ちにする。差分の `-` 行がそのスキルの名前を含む修正は、別の案にせず、このスキルの削除の案に入れる。承認が要らないスキルの削除は退避先に残し、参照の修正も残す。
-   - 案には、claude が `runs/<日時>/destinations<対象の元の位置を写した場所>/` に書いた「消える記述の行き先」の表と、`moves.tsv` に挙げた移し先への追加の差分を入れる（Skill `change-review` の「2.2」）。表が無い・移し先の候補が無い・移し先の差分が作れない案は、見出しに「（移し先の確認が必要）」が付く。
-   - `moves.tsv` に挙がった移し先のファイルを claude が直接書き換えていたら、追加だけの変更でも実行前の版に戻し、`history.md` の注意に書く。
-   - `change-review` が見つからなければ、戻すだけで承認待ちは作らず、その旨を記録する。
-8. 承認なしで反映した変更か承認待ちがあれば、`STATE_DIR/history.md` の冒頭の `---` の次へ記録を足す。ファイルが無ければ、冒頭の説明と `---` を作ってから足す。同じ内容を結果 `CLAUDE_REPORTS_ROOT/skill-audit/<YYYY-MM-DD>.md` の「承認なしで反映した変更と承認待ち」の節に書く。同じ実行で公開版の点検が結果を書いていれば、そのファイルへ足す。
-9. 終了コード0のときだけ、再計算した hash で `last-hash` を更新する。
+削除の候補は`STATE_DIR/runs/<日時>/deletions.tsv`へ「元の絶対パス<TAB>理由」で書く。
+区分は同じ階層の`needs-approval.tsv`の理由と、Skill `change-review`の「0.1」の判定に従う。
+訂正リストで同じ種類が2回訂正された変更、安全のための規則の変更、行き先の表の欠けは`要確認`にする。
+種類は`skill-audit/<追加|修正|削除>/<スキル名>`とする。
+
+行き先の表は`STATE_DIR/runs/<日時>/destinations/<対象の元の位置を写した場所>/table.md`へ書く。
+移し先への追加があれば、書き足した後の全文と`moves.tsv`も同じ場所に置く。
+スキルの削除と、そのスキルを指す参照の修正は1件にまとめる。
+移し先を含め、元の対象は変更しない。
+`change-review`のスクリプトが無ければ、記録せず理由を結果に書く。
+新しい変更を台帳へ記録しない。
+
+公開版の点検は`--dry-run`以外で毎回行う。
+スキルに変更が無く精査を省略する場合も点検する。
+点検の条件と出力はSkill `skill-audit`の「2.8」に従う。
 
 ### --dry-run の扱い
 

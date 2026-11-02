@@ -1,6 +1,6 @@
 #!/bin/bash
 # install.sh の定期実行（週1回の見直しの3つ）と見回りの範囲（patrol.conf）の検査。
-# 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl・brew・terminal-notifier には触れない。
+# 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl には触れない。
 set -u
 # 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
 ALT_DIR=.claude_alt
@@ -21,6 +21,7 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
 export CALLS="$WORK/calls.log"
+: >"$CALLS"
 export FAKE_LAUNCHD="$WORK/launchd-registered"
 mkdir -p "$FAKE_LAUNCHD"
 cat >"$FAKEBIN/launchctl" <<'FAKE'
@@ -34,22 +35,18 @@ esac
 FAKE
 chmod +x "$FAKEBIN/launchctl"
 ln -s "$(command -v jq)" "$FAKEBIN/jq"
-# 必要なものの確認: 本物の xcode-select・Homebrew の場所・claude を見ないように差し替える。claude は偽物を置く。
+# 必要なものの確認: 本物の xcode-select・claude を見ないように差し替える。claude は偽物を置く。
 mkdir -p "$WORK/clt/usr/bin"
 printf '#!/bin/bash\n' >"$WORK/clt/usr/bin/python3"
 printf '#!/bin/bash\n[ "$1" = "-p" ] && echo "%s"\n' "$WORK/clt" >"$WORK/xcode-select"
 printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/claude"
-# terminal-notifier も偽物を置き、Homebrew と terminal-notifier の問いを出さない。
-printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/terminal-notifier"
-chmod +x "$WORK/clt/usr/bin/python3" "$WORK/xcode-select" "$FAKEBIN/claude" "$FAKEBIN/terminal-notifier"
+chmod +x "$WORK/clt/usr/bin/python3" "$WORK/xcode-select" "$FAKEBIN/claude"
 export CLAUDE_REVIEW_XCODE_SELECT="$WORK/xcode-select"
-export CLAUDE_REVIEW_BREW_PATHS=""
 export CLAUDE_REVIEW_CLAUDE_PATHS=""
-export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/no-brew-installer"
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
 export HOME="$WORK/home"
-unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME
+unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME
 mkdir -p "$HOME/.claude" "$HOME/${ALT_DIR}/skills"
 ln -s ../${ALT_DIR}/skills "$HOME/.claude/skills"
 printf '{}\n' >"$HOME/.claude/settings.json"

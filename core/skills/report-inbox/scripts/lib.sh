@@ -10,7 +10,7 @@ INBOX_STATE_DIR="${INBOX_STATE_DIR%/}/report-inbox"
 READ_FILE="$INBOX_STATE_DIR/read.txt"
 NL=$'\n'
 TAB=$'\t'
-# Skill change-review の承認待ちの置き場所。REPORTS_ROOT の下にあるが、結果のジョブとしては数えない。
+# 否認・訂正リストと旧来の案のファイルの置き場所は、結果のジョブとして数えない。
 PROPOSALS_JOB="proposals"
 PROPOSALS_DIR="${CLAUDE_REVIEW_PROPOSALS:-$REPORTS_ROOT/$PROPOSALS_JOB}"
 PROPOSALS_DIR="${PROPOSALS_DIR%/}"
@@ -76,7 +76,7 @@ is_read() {
 # レポートを「日付<TAB>連番<TAB>ジョブ名<TAB>パス」の形で1行に1件ずつ出力する。順序は問わない。
 # 各ジョブのディレクトリ直下だけを見る。.snapshots・.staging などの下位ディレクトリは数えない。
 # ドット始まりのディレクトリは glob に一致しないため、ジョブとしても数えない。
-# 承認待ちの置き場所（PROPOSALS_JOB）は結果のジョブではないため数えない。
+# 否認・訂正リストの置き場所（PROPOSALS_JOB）は結果のジョブではないため数えない。
 list_reports() {
   local dir job f base seq
   for dir in "$REAL_ROOT"/*/; do
@@ -134,7 +134,7 @@ normalize_report_path() {
 
 # ---- 定期実行の失敗の知らせ ----
 # 対象のジョブと、各ジョブの状態ディレクトリ。各ジョブのスクリプトと同じ環境変数で差し替えられる。
-FAIL_JOBS="feedback-mining memory-audit repo-patrol skill-audit secret-patrol"
+FAIL_JOBS="feedback-mining memory-audit repo-patrol skill-audit secret-patrol weakness-review"
 FAIL_STATE_BASE="${CLAUDE_REPORTS_STATE:-$HOME/.local/state/claude-reports}"
 FAIL_STATE_BASE="${FAIL_STATE_BASE%/}"
 FAIL_SKILL_AUDIT_STATE="${SKILL_AUDIT_STATE:-$HOME/.local/state/skill-audit}"
@@ -271,49 +271,14 @@ mark_failure_read() {
   printf '%s\n%s\n' "$now" "$n" >"$FAIL_READ_DIR/$job.tmp" && mv -f "$FAIL_READ_DIR/$job.tmp" "$FAIL_READ_DIR/$job"
 }
 
-# ---- 承認待ち（Skill change-review） ----
-# status が pending の承認待ちを「id<TAB>見出し<TAB>targets」の形で1行に1件ずつ、id の昇順に出力する。
-# targets は「, 」でつなぐ。見出しは frontmatter の後の最初の「# 」で始まる行である。
-# frontmatter が壊れたもの（先頭が --- でない、閉じの --- が無い、id か status が無い）は出さない。
-list_pending_proposals() {
-  local f found=0
-  for f in "$PROPOSALS_DIR"/*.md; do
-    [ -f "$f" ] && found=1 && break
+# ---- 直したいこと（Skill change-review） ----
+list_pending_changes() {
+  local c
+  for c in "${CHANGE_REVIEW_SCRIPTS:-}" "${SCRIPT_DIR:-.}/../../change-review/scripts" "$HOME/.claude/skills/change-review/scripts"; do
+    if [ -n "$c" ] && [ -f "$c/changes-log.py" ]; then
+      python3 -B "$c/changes-log.py" list
+      return
+    fi
   done
-  [ "$found" -eq 1 ] || return 0
-  awk '
-    function trim(v) {
-      sub(/^[ \t]+/, "", v); sub(/[ \t\r]+$/, "", v)
-      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
-      return v
-    }
-    function flush() {
-      if (state == 2 && id != "" && status == "pending") print id "\t" head "\t" targets
-    }
-    FNR == 1 {
-      if (NR > 1) flush()
-      # state: 0 は frontmatter の外（不正）、1 は frontmatter の中、2 は frontmatter の後
-      state = ($0 ~ /^---[ \t\r]*$/) ? 1 : 0
-      id = ""; status = ""; head = ""; targets = ""; in_targets = 0
-      next
-    }
-    state == 1 {
-      if ($0 ~ /^---[ \t\r]*$/) { state = 2; next }
-      if (in_targets && $0 ~ /^[ \t]+- /) {
-        v = $0; sub(/^[ \t]+- /, "", v); v = trim(v)
-        if (v != "") targets = targets (targets == "" ? "" : ", ") v
-        next
-      }
-      in_targets = 0
-      if ($0 ~ /^id:/) { v = $0; sub(/^id:/, "", v); id = trim(v) }
-      else if ($0 ~ /^status:/) { v = $0; sub(/^status:/, "", v); status = trim(v) }
-      else if ($0 ~ /^targets:/) {
-        v = $0; sub(/^targets:/, "", v); v = trim(v)
-        if (v == "") in_targets = 1
-        else { gsub(/^\[|\]$/, "", v); gsub(/[ \t]*,[ \t]*/, ", ", v); targets = v }
-      }
-      next
-    }
-    state == 2 && head == "" && $0 ~ /^# / { head = $0; sub(/^# +/, "", head); sub(/[ \t\r]+$/, "", head) }
-    END { if (NR > 0) flush() }' "$PROPOSALS_DIR"/*.md 2>/dev/null | LC_ALL=C sort -t "$TAB" -k1,1
+  return 0
 }

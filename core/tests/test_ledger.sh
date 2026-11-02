@@ -66,25 +66,10 @@ check "相対パスの対象を拒否する" '[ "$rc" -eq 2 ]'
 TAB=$'\t'
 check "show は種類と対象を出す" '[ "$(bash "$CR/ledger.sh" show memory-audit-2026-10-16-100000-01)" = "memory-audit/修正/p/a.md${TAB}$T" ]'
 
-echo "== 会話の開始時の知らせ（unread.sh）"
-mkdir -p "$CLAUDE_REPORTS_ROOT"
+echo "== 旧台帳は開始時に知らせない"
 out="$("$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "前回の会話以降に自動で反映した変更の件数と ID を出す" '[ "$out" = "前回の会話以降に自動で反映した変更 3件（memory-audit-2026-10-16-100000-01、skill-audit-2026-10-16-100000-01、skill-audit-2026-10-16-100000-02。戻すときは「<ID> を戻して」）" ]'
-out="$("$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "2回目は出さない（印を進める）" '[ -z "$out" ]'
-for i in 03 04 05 06; do
-  bash "$CR/ledger.sh" record --id "skill-audit-2026-10-16-100000-$i" --kind skill-audit/追加/x --target "$HOME/skills/x/f$i.md" --before - --after - >/dev/null
-done
-out="$("$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "4件以上は3件だけ ID を並べる" 'printf "%s" "$out" | grep -Fq "自動で反映した変更 4件（skill-audit-2026-10-16-100000-03、skill-audit-2026-10-16-100000-04、skill-audit-2026-10-16-100000-05 ほか。"'
-bash "$CR/ledger.sh" record --id skill-audit-2026-10-16-100000-07 --kind skill-audit/追加/x --target "$HOME/skills/x/f07.md" --before - --after - >/dev/null
-"$REPO/core/skills/report-inbox/scripts/unread.sh" >&-
-out="$("$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "表示に失敗したら印を進めず、次の会話で出す" 'printf "%s" "$out" | grep -Fq "自動で反映した変更 1件（skill-audit-2026-10-16-100000-07。"'
-out="$("$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "表示できたら印を進める" '[ -z "$out" ]'
-out="$(CLAUDE_CHANGE_LEDGER="$WORK/no-ledger""$REPO/core/skills/report-inbox/scripts/unread.sh")"
-check "台帳が無ければ何も出さない" '[ -z "$out" ] && [ ! -e "$WORK/no-ledger" ]'
+check "旧台帳の記録は件数に含めない" '[ -z "$out" ]'
+check "開始時に台帳の既読印を作らない" '[ ! -e "$L/seen" ]'
 
 echo "== 戻す"
 out="$(bash "$CR/revert.sh" memory-audit-2026-10-16-100000-01 2>&1)"; rc=$?

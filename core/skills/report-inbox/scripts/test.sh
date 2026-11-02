@@ -220,78 +220,40 @@ elapsed="$(perl -e "printf '%.3f', $end - $start")"
 mv "$READ.bak" "$READ"
 check "失敗ありの unread.sh は${LIMIT}秒以内（実際: ${elapsed}秒）" 'perl -e "exit(!($elapsed < $LIMIT))" && printf "%s" "$out" | grep -q "。失敗: "'
 
-echo "== 承認待ち（Skill change-review）"
-# 失敗の知らせと既読の結果を片付けてから、承認待ちだけを見る。
+echo "== 直したいこと（Skill change-review）"
 "$SCRIPT_DIR/mark-read.sh" --all >/dev/null
-P="$R/proposals"
-mkdir -p "$P"
+export CLAUDE_REVIEW_CHANGES_LOG="$WORK/changes/log.md"
+CR="$SCRIPT_DIR/../../change-review/scripts"
+: >"$WORK/empty.diff"
 out="$("$SCRIPT_DIR/unread.sh")"
-check "承認待ち0件（置き場所のみ）: 何も出さない（出力: ${out}）" '[ -z "$out" ]'
-write_proposal() {
-  # 引数: ファイル名、id、status
-  printf -- '---\nid: %s\nstatus: %s\ncreated: 2026-10-02 17:45\ntargets:\n  - /path/to/a.md\n  - /path/to/b.md\n---\n\n# 見出し %s\n\n## 理由\n\n本文\n' "$2" "$3" "$2" >"$P/$1"
-}
-write_proposal 2026-10-03-01-a.md 2026-10-03-01 applied
-write_proposal 2026-10-03-02-b.md 2026-10-03-02 rejected
+check "記録が無ければ何も出さない" '[ -z "$out" ]'
+id="$(bash "$CR/new-change.sh" --source 会話 --title 直す --diff-file "$WORK/empty.diff" --target /path/to/a.md)"
+expected="直したいこと 1件（うち要確認 1件、${id}〜）"
 out="$("$SCRIPT_DIR/unread.sh")"
-check "applied と rejected は数えない（出力: ${out}）" '[ -z "$out" ]'
-write_proposal 2026-10-04-01-c.md 2026-10-04-01 pending
-out="$("$SCRIPT_DIR/unread.sh")"
-echo "$out"
-check "承認待ち1件" '[ "$out" = "承認待ち 1件（2026-10-04-01〜）" ]'
-write_proposal 2026-10-05-01-d.md 2026-10-05-01 pending
-write_proposal 2026-10-02-09-e.md 2026-10-02-09 pending
-# 結果のジョブと同じ名前の形のファイルを置いても、結果として数えない。
-write_proposal 2026-10-06.md 2026-10-06-01 applied
-# 壊れた frontmatter: 閉じが無い、先頭が --- でない、status が無い、id が無い、空のファイル。
-printf -- '---\nid: 2026-09-01-01\nstatus: pending\n\n# 閉じが無い\n' >"$P/broken-1.md"
-printf -- 'id: 2026-09-01-02\nstatus: pending\n---\n# 先頭が無い\n' >"$P/broken-2.md"
-printf -- '---\nid: 2026-09-01-03\n---\n# status が無い\n' >"$P/broken-3.md"
-printf -- '---\nstatus: pending\n---\n# id が無い\n' >"$P/broken-4.md"
-: >"$P/broken-5.md"
-out="$("$SCRIPT_DIR/unread.sh" 2>&1)"
-echo "$out"
-check "複数: 件数と最も古い id を出し、壊れた frontmatter は数えず標準エラーにも出さない" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）" ]'
-out="$("$SCRIPT_DIR/list.sh" 2>&1)"
-check "承認待ちは結果の一覧に出さない" '! printf "%s" "$out" | grep -q proposals'
-out="$("$SCRIPT_DIR/list.sh" --proposals 2>&1)"
-echo "$out"
-check "list.sh --proposals は pending を id の昇順に「id / 見出し / targets」で出す" '[ "$out" = "2026-10-02-09 / 見出し 2026-10-02-09 / /path/to/a.md, /path/to/b.md${NL}2026-10-04-01 / 見出し 2026-10-04-01 / /path/to/a.md, /path/to/b.md${NL}2026-10-05-01 / 見出し 2026-10-05-01 / /path/to/a.md, /path/to/b.md" ]'
-"$SCRIPT_DIR/list.sh" --proposals --unread >/dev/null 2>&1
-rc=$?
-check "--proposals と --unread は併用できない（rc=${rc}）" '[ "$rc" -eq 2 ]'
+check "未対応の件数・要確認の件数・最も古いIDを1行で出す" '[ "$out" = "$expected" ]'
 "$SCRIPT_DIR/mark-read.sh" --all >/dev/null
-out="$("$SCRIPT_DIR/unread.sh")"
-check "承認待ちは既読にならない（出力: ${out}）" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）" ]'
-echo "# test" >"$R/repo-patrol/2026-10-11.md"
-# 失敗は既読にした時刻より後でなければ出ないため、現在の時刻で書く。
+check "結果を既読にしても直したいことは残る" '[ "$("$SCRIPT_DIR/unread.sh")" = "$expected" ]'
+out="$("$SCRIPT_DIR/list.sh" --changes)"
+check "未対応の一覧を出す" 'printf "%s" "$out" | grep -Fq "$id / 直す /"'
+"$SCRIPT_DIR/list.sh" --changes --unread >/dev/null 2>&1
+check "一覧の種類を併用できない" '[ $? -eq 2 ]'
+echo '# test' >"$R/repo-patrol/2026-10-11.md"
 sleep 1
 now_ts="$(date '+%Y-%m-%d %H:%M:%S')"
 printf '[%s] ERROR: 精査が異常終了しました（終了コード 3）\n' "$now_ts" >"$S/memory-audit/logs/2099-01-01-000000.log"
 out="$("$SCRIPT_DIR/unread.sh")"
-echo "$out"
-check "承認待ち・結果・失敗の全部を1行に並べる" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）。未読の結果: repo-patrol 1件（2026-10-11）。失敗: memory-audit（${now_ts:0:16}。ログ $S/memory-audit/logs/2099-01-01-000000.log）" ]'
+check "記録・結果・失敗を1行に並べる" '[ "$out" = "${expected}。未読の結果: repo-patrol 1件（2026-10-11）。失敗: memory-audit（${now_ts:0:16}。ログ $S/memory-audit/logs/2099-01-01-000000.log）" ]'
 rm -f "$S/memory-audit/logs/2099-01-01-000000.log"
 "$SCRIPT_DIR/mark-read.sh" --all >/dev/null
-write_proposal 2026-10-05-02-f.md 2026-10-05-02 approved
-out="$("$SCRIPT_DIR/unread.sh")"
-check "承認済み・未反映の件数を足す（出力: ${out}）" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）・承認済み・未反映 1件" ]'
-# core/skills の中では隣に change-review があるため、隣に何も無い場所へ複製した scripts で試す。
-mkdir -p "$WORK/isolated/report-inbox" && cp -Rp "$SCRIPT_DIR" "$WORK/isolated/report-inbox/scripts"
-out="$(CHANGE_REVIEW_SCRIPTS= HOME="$WORK/nohome" "$WORK/isolated/report-inbox/scripts/unread.sh")"
-check "count.sh が見つからなければ承認待ちだけを数える（出力: ${out}）" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）" ]'
-mv "$P" "$WORK/proposals-moved"
-out="$(CLAUDE_REVIEW_PROPOSALS="$WORK/proposals-moved" "$SCRIPT_DIR/unread.sh")"
-check "置き場所は CLAUDE_REVIEW_PROPOSALS で差し替えられる（出力: ${out}）" '[ "$out" = "承認待ち 3件（2026-10-02-09〜）・承認済み・未反映 1件" ]'
-for f in "$WORK/proposals-moved"/2026-10-0[245]-0[129]-*.md; do sed -i '' 's/^status: .*/status: applied/' "$f"; done
-out="$(CLAUDE_REVIEW_PROPOSALS="$WORK/proposals-moved" "$SCRIPT_DIR/unread.sh")"
-check "すべて反映済みなら何も出さない（出力: ${out}）" '[ -z "$out" ]'
-P_SAVE="$P"; P="$WORK/proposals-moved"
-write_proposal 2026-10-05-03-g.md 2026-10-05-03 approved
-P="$P_SAVE"
-out="$(CLAUDE_REVIEW_PROPOSALS="$WORK/proposals-moved" "$SCRIPT_DIR/unread.sh")"
-check "承認済み・未反映だけの行（出力: ${out}）" '[ "$out" = "承認済み・未反映 1件" ]'
-rm -rf "$P" "$WORK/proposals-moved"
+bash "$CR/changes.sh" mark "$id" done 直した
+check "対応済みなら知らせない" '[ -z "$("$SCRIPT_DIR/unread.sh")" ]'
+id="$(bash "$CR/new-change.sh" --id-prefix memory-audit --kind 直してよい --source memory-audit --title 追加 --diff-file "$WORK/empty.diff" --target /path/to/b.md)"
+check "直してよい項目だけなら要確認0件" '[ "$("$SCRIPT_DIR/unread.sh")" = "直したいこと 1件（うち要確認 0件、${id}〜）" ]'
+mv "$R" "$R.save"
+check "結果のディレクトリが無くても件数が出る" '[ "$("$SCRIPT_DIR/unread.sh")" = "直したいこと 1件（うち要確認 0件、${id}〜）" ]'
+mv "$R.save" "$R"
+bash "$CR/changes.sh" mark "$id" skip 見送る
+check "見送りなら知らせない" '[ -z "$("$SCRIPT_DIR/unread.sh")" ]'
 
 echo "== 速度（既読2000件、レポート2000件で${LIMIT}秒以内）"
 rm -rf "$R"/job*
@@ -323,25 +285,6 @@ end="$(perl -MTime::HiRes=time -e 'printf "%.3f", time')"
 elapsed="$(perl -e "printf '%.3f', $end - $start")"
 check "同じ条件の list.sh --unread は${LIMIT}秒以内（実際: ${elapsed}秒）" 'perl -e "exit(!($elapsed < $LIMIT))" && printf "%s\n" "$out" | grep -c "/bulk/" | grep -qx 1 && [ "$(printf "%s\n" "$out" | wc -l | tr -d " ")" = "1" ]'
 mv "$READ.keep" "$READ"
-
-echo "== 承認の画面のサーバーが記録した既読"
-# サーバー（core/server/inbox_server.py）の記録の関数で既読にし、list.sh が同じ記録を既読として扱うことを確かめる。
-SERVER_DIR="$(cd "$SCRIPT_DIR/../../../server" && pwd -P)"
-R2="$WORK/reports-server"
-S2="$WORK/state-server"
-mkdir -p "$R2/repo-patrol"
-echo x >"$R2/repo-patrol/2026-10-05.md"
-echo x >"$R2/repo-patrol/2026-10-06.md"
-CLAUDE_REPORTS_ROOT="$R2" CLAUDE_REPORTS_STATE="$S2" "${CLAUDE_REVIEW_PYTHON:-/usr/bin/python3}" -B -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-import inbox_server as s
-root = s.reports_root()
-sys.exit(0 if s.mark_reports_read([s.report_real_path(root, "repo-patrol", "2026-10-05.md")]) == 1 else 1)
-' "$SERVER_DIR"
-rc=$?
-out="$(CLAUDE_REPORTS_ROOT="$R2" CLAUDE_REPORTS_STATE="$S2" "$SCRIPT_DIR/list.sh" --unread)"
-check "サーバーが記録した既読を list.sh --unread が既読として扱う" '[ "$rc" -eq 0 ] && [ "$out" = "repo-patrol / 2026-10-06 / $R2/repo-patrol/2026-10-06.md / 未読" ]'
 
 echo "== 実行権限"
 for f in lib.sh unread.sh mark-read.sh list.sh test.sh; do

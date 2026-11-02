@@ -3,16 +3,13 @@
 # 使い方: ./install.sh [--with-schedule | --no-schedule] [--yes] [--dry-run] [--uninstall]
 #   --with-schedule  週1回の見直し（memory-audit・feedback-mining・skill-audit）を聞かずに登録する
 #   --no-schedule    週1回の見直しを登録しない（登録済みなら外す）
-#   --yes            足りないもの（Xcode のコマンドラインツール・Homebrew・terminal-notifier）を聞かずに入れる。
+#   --yes            足りないもの（Xcode のコマンドラインツール）を聞かずに入れる。
 #                    見回りの範囲は聞かずに「書類・デスクトップ・ダウンロードを入れない、リポジトリを見回らない」とする
 #   --dry-run     何も変えず、必要なものの確認の結果・聞く内容・行う操作を表示する
 #   --uninstall   launchd から外し、このリポジトリを指すリンクと足したフックを消す
 # 環境変数:
-#   CLAUDE_REVIEW_LABEL   launchd のラベル（既定 com.<ユーザー名>.claude-review-inbox。ユーザー名のドットはハイフンに置き換える）
-#   CLAUDE_REVIEW_PORT    画面のポート（既定 8010）
-#   CLAUDE_REVIEW_APPROVAL_MODE  承認の進め方（screen: 承認あり・画面を常駐させる（既定）、auto: 承認なし・画面を登録しない）。
-#                         jobs.conf（<XDG_CONFIG_HOME>/claude-review-inbox/jobs.conf）の同名の行でも指定できる
-#   CLAUDE_REVIEW_PYTHON  サーバーを動かす Python 3.9 以上（既定 /usr/bin/python3。Xcode のコマンドラインツールが必要）
+#   CLAUDE_REVIEW_CHANGES_LOG  直したいことの記録（既定 ~/.local/state/claude-reports/changes/log.md）
+#   CLAUDE_REVIEW_PYTHON  フックの設定に使う Python 3.9 以上（既定 /usr/bin/python3。Xcode のコマンドラインツールが必要）
 #   XDG_CONFIG_HOME       見回りの範囲の設定ファイル（<XDG_CONFIG_HOME>/claude-review-inbox/patrol.conf）の置き場所（既定 ~/.config）
 set -euo pipefail
 
@@ -37,25 +34,21 @@ for arg in "$@"; do
       schedule_opt="$arg"
       ;;
     --yes) assume_yes=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) printf 'ERROR: 不明な引数です: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
 
 user_name="$(id -un)"
 uid="$(id -u)"
-LABEL="${CLAUDE_REVIEW_LABEL:-com.${user_name//./-}.claude-review-inbox}"
-PORT="${CLAUDE_REVIEW_PORT:-8010}"
 SYSTEM_PYTHON="${CLAUDE_REVIEW_SYSTEM_PYTHON:-/usr/bin/python3}"
 PYTHON="${CLAUDE_REVIEW_PYTHON:-$SYSTEM_PYTHON}"
-# 必要なものを探す場所。CLAUDE_REVIEW_XCODE_SELECT・_BREW_PATHS・_CLAUDE_PATHS・_BREW_INSTALLER・_SYSTEM_PYTHON は検査用。
+# 必要なものを探す場所。CLAUDE_REVIEW_XCODE_SELECT・_CLAUDE_PATHS・_SYSTEM_PYTHON は検査用。
 XCODE_SELECT="${CLAUDE_REVIEW_XCODE_SELECT:-xcode-select}"
-BREW_PATHS="${CLAUDE_REVIEW_BREW_PATHS-/opt/homebrew/bin/brew /usr/local/bin/brew}"
 CLAUDE_PATHS="${CLAUDE_REVIEW_CLAUDE_PATHS-$HOME/.local/bin/claude $HOME/.claude/local/claude /opt/homebrew/bin/claude /usr/local/bin/claude}"
-BREW_INSTALLER="${CLAUDE_REVIEW_BREW_INSTALLER:-}"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_DIR="$HOME/.local/state/claude-review-inbox"
 PROPOSALS_DIR="$HOME/claude-reports/proposals"
+CHANGES_LOG="${CLAUDE_REVIEW_CHANGES_LOG:-$HOME/.local/state/claude-reports/changes/log.md}"
 # SessionStart フックに登録するコマンド。report-inbox の件数の1行、2つの見回りの起動、外部スキルの新しい版の確認である。
 HOOK_CMDS=("$REPO/core/skills/report-inbox/scripts/unread.sh"
   "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
@@ -121,14 +114,6 @@ config_list="${CLAUDE_REVIEW_CONFIG_DIRS:-}"
 if [ -z "$config_list" ] && [ -f "$JOBS_CONF" ]; then
   config_list="$(sed -n 's/^CLAUDE_REVIEW_CONFIG_DIRS=//p' "$JOBS_CONF" | tail -n 1)"
 fi
-# 承認の進め方。環境変数 CLAUDE_REVIEW_APPROVAL_MODE、jobs.conf、既定（screen）の順に決める。
-#   screen  承認あり。承認の画面のサーバーを常駐させる
-#   auto    承認なし。承認の画面のサーバーを登録しない（承認が要るものは会話で承認する）
-APPROVAL_MODE="${CLAUDE_REVIEW_APPROVAL_MODE:-}"
-if [ -z "$APPROVAL_MODE" ] && [ -f "$JOBS_CONF" ]; then
-  APPROVAL_MODE="$(sed -n 's/^CLAUDE_REVIEW_APPROVAL_MODE=//p' "$JOBS_CONF" | tail -n 1)"
-fi
-[ "$APPROVAL_MODE" = auto ] || APPROVAL_MODE=screen
 config_dirs=("$HOME/.claude")
 IFS=: read -r -a config_items <<<"$config_list"
 for c in ${config_items[@]+"${config_items[@]}"}; do
@@ -172,9 +157,9 @@ skill_sources=()
 for s in "$REPO"/core/skills/*/; do skill_sources+=("${s%/}"); done
 
 # 登録済みなら launchd から外す。--dry-run では launchctl を一切呼ばず、行う操作だけを表示する。
-# 引数: [ラベル]（省略時はサーバーのラベル）
+# 引数: <ラベル>
 bootout_if_registered() {
-  local label="${1:-$LABEL}"
+  local label="$1"
   if [ "$dry_run" -eq 1 ]; then
     printf '[dry-run] （登録済みなら）launchctl bootout gui/%s/%s\n' "$uid" "$label"
     return 0
@@ -343,57 +328,22 @@ unlink_skills() {
   done
 }
 
-# ---- 通知の確認 ----
-NOTIFY_TITLE="claude-review-inbox"
-NOTIFY_MESSAGE="claude-review-inbox の通知の確認です"
-
-# terminal-notifier で試しの通知を1回出す。失敗したらアプリとして1回起動してから、もう一度試す。
-check_notifier() {
-  local tn prefix app
-  if [ "$dry_run" -eq 1 ]; then
-    printf '[dry-run] （terminal-notifier があれば）試しの通知を出し、失敗したら open -W -a <terminal-notifier.app> で1回起動する\n'
-    return 0
-  fi
-  tn="$TN"
-  [ -n "$tn" ] || return 0
-  if "$tn" -title "$NOTIFY_TITLE" -message "$NOTIFY_MESSAGE" >/dev/null 2>&1; then
-    info "試しの通知を出しました（terminal-notifier）"
-    return 0
-  fi
-  warn "terminal-notifier で試しの通知を出せませんでした。アプリとして1回起動して、通知の許可を求めます"
-  prefix=""
-  if [ -n "$BREW" ]; then
-    prefix="$("$BREW" --prefix terminal-notifier 2>/dev/null || true)"
-  fi
-  app="$prefix/terminal-notifier.app"
-  if [ -n "$prefix" ] && [ -d "$app" ]; then
-    open -W -a "$app" --args -title "$NOTIFY_TITLE" -message "$NOTIFY_MESSAGE" || true
-    if "$tn" -title "$NOTIFY_TITLE" -message "$NOTIFY_MESSAGE" >/dev/null 2>&1; then
-      info "試しの通知を出しました（terminal-notifier をアプリとして起動した後）"
-      return 0
-    fi
-  else
-    warn "terminal-notifier.app の場所が分かりませんでした"
-  fi
-  warn "通知を出せませんでした。次の手順で許可してください（インストールは続けます）"
-  info "  1. 「システム設定」の「通知」を開く"
-  info "  2. 一覧の terminal-notifier を選び、「通知を許可」を有効にする"
-  info "  3. 一覧に無い場合は、次を実行してから 1. に戻る"
-  info "     open -W -a \"\$(brew --prefix terminal-notifier)/terminal-notifier.app\" --args -title test -message test"
-}
-
-# ---- launchd ----
-write_plist() {
-  local tmpl="$REPO/core/launchd/claude-review-inbox.plist.template" tmp
-  run mkdir -p "$(dirname "$PLIST")"
-  info "plist を書きます: $PLIST"
-  [ "$dry_run" -eq 1 ] && return 0
-  tmp="$(mktemp "$PLIST.tmp.XXXXXX")"
-  sed -e "s|@@LABEL@@|$LABEL|g" -e "s|@@PYTHON@@|$PYTHON|g" \
-    -e "s|@@SERVER@@|$REPO/core/server/inbox_server.py|g" \
-    -e "s|@@PORT@@|$PORT|g" -e "s|@@STATE_DIR@@|$STATE_DIR|g" -e "s|@@PATH@@|$LAUNCHD_PATH|g" "$tmpl" >"$tmp"
-  plutil -lint "$tmp" >/dev/null
-  mv -f "$tmp" "$PLIST"
+# 旧版の常駐サーバーを外す。同じ名前でも他のリポジトリを指す plist は残す。
+remove_legacy_server() {
+  local f arg label server_dir
+  for f in "$AGENTS_DIR"/com.*.claude-review-inbox.plist; do
+    [ -f "$f" ] || continue
+    arg="$(plutil -extract ProgramArguments.1 raw "$f" 2>/dev/null)" || continue
+    # 削除済みのスクリプトでも、親の core の実体から旧位置を経由するパスを判定する。
+    server_dir="$(dirname "$arg")"
+    [ "${server_dir##*/}" = server ] || continue
+    [ "$(real_path "$(dirname "$server_dir")")" = "$REPO/core" ] || continue
+    label="$(plutil -extract Label raw "$f" 2>/dev/null)" || continue
+    [ -n "$label" ] || continue
+    info "旧版のサーバーを外します: ${label}（${f}）"
+    bootout_if_registered "$label"
+    run rm "$f"
+  done
 }
 
 # ---- 定期実行（週1回の見直しの3つ） ----
@@ -587,10 +537,7 @@ setup_patrol_conf() {
 }
 
 # ---- 必要なものの確認 ----
-TN=""
-BREW=""
 CLAUDE_BIN=""
-LAUNCHD_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 # コマンドを PATH と、続けて渡した場所の順に探し、最初に見つかった実行できるパスを出す。
 find_cmd() {
@@ -636,27 +583,6 @@ ask() {
   case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
-# 見つかった brew・claude・terminal-notifier のフォルダを、launchd に渡す PATH の前に足す。
-build_launchd_path() {
-  local p d out=""
-  for p in "$CLAUDE_BIN" "$BREW" "$TN"; do
-    [ -n "$p" ] || continue
-    d="$(dirname "$p")"
-    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
-  done
-  for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
-    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
-  done
-  LAUNCHD_PATH="$out"
-}
-
-find_brew() { BREW="$(find_cmd brew $BREW_PATHS)" || BREW=""; }
-find_tn() {
-  local extra=""
-  [ -n "$BREW" ] && extra="$(dirname "$BREW")/terminal-notifier"
-  TN="$(find_cmd terminal-notifier $extra)" || TN=""
-}
-
 check_prerequisites() {
   local clt="" py_ok=0 py_state planned=() missing_required=0 st
   # 1. Xcode のコマンドラインツール（既定の /usr/bin/python3 を使うときだけ必要）
@@ -676,18 +602,12 @@ check_prerequisites() {
   else
     py_state="古い（${PYTHON}。3.9 以上が必要）"
   fi
-  # 4〜6
-  find_brew
-  find_tn
+  # 3. claude
   CLAUDE_BIN="$(find_cmd claude $CLAUDE_PATHS)" || CLAUDE_BIN=""
 
   info "必要なものの確認:"
   printf '  %s: %s\n' "Xcode のコマンドラインツール（必須）" "$clt"
   printf '  %s: %s\n' "Python 3.9 以上（必須）" "$py_state"
-  st="なし"; [ -n "$BREW" ] && st="あり（${BREW}）"
-  printf '  %s: %s\n' "Homebrew（任意）" "$st"
-  st="なし"; [ -n "$TN" ] && st="あり（${TN}）"
-  printf '  %s: %s\n' "terminal-notifier（任意）" "$st"
   st="なし"; [ -n "$CLAUDE_BIN" ] && st="あり（${CLAUDE_BIN}）"
   printf '  %s: %s\n' "claude（週1回の見直しに必要）" "$st"
 
@@ -696,58 +616,25 @@ check_prerequisites() {
     if [ "$dry_run" -eq 1 ]; then
       planned+=("Xcode のコマンドラインツール（xcode-select --install）")
       missing_required=1
-    elif ask "Xcode のコマンドラインツールを入れますか。承認の画面のサーバーを動かす Python に使います"; then
+    elif ask "Xcode のコマンドラインツールを入れますか。フックの設定に使う Python に必要です"; then
       "$XCODE_SELECT" --install || true
       info "画面の指示で入れ終えてから、もう一度 ./install.sh を実行してください"
       exit 2
     else
-      info "Xcode のコマンドラインツールが無いため、承認の画面のサーバーが動きません。入れずに終了します"
+      info "Xcode のコマンドラインツールが無いため、フックを設定できません。入れずに終了します"
       info "入れ方: xcode-select --install を実行し、画面の指示で入れてから ./install.sh を実行してください"
       exit 2
     fi
   elif [ "$py_ok" -eq 0 ]; then
-    info "Python 3.9 以上が見つからないため、承認の画面のサーバーが動きません。入れずに終了します"
+    info "Python 3.9 以上が見つからないため、フックを設定できません。入れずに終了します"
     info "別の Python を使う場合は、CLAUDE_REVIEW_PYTHON にそのパスを指定して ./install.sh を実行してください"
     if [ "$dry_run" -eq 0 ]; then exit 2; fi
     missing_required=1
   fi
 
-  # 任意のもの: Homebrew と terminal-notifier
-  if [ -z "$TN" ]; then
-    if [ -z "$BREW" ]; then
-      if [ "$dry_run" -eq 1 ]; then
-        planned+=("Homebrew（聞いてから入れる。管理者のパスワードを求められる）")
-        planned+=("terminal-notifier（聞いてから brew install terminal-notifier）")
-      else
-        info "Homebrew を入れる場合は、途中で管理者のパスワードを求められます。"
-        if ask "Homebrew を入れますか。terminal-notifier（押すと画面が開く通知）を入れるために使います。入れない場合も、押しても画面が開かない通知で動きます"; then
-          if [ -n "$BREW_INSTALLER" ]; then
-            "$BREW_INSTALLER" || warn "Homebrew を入れられませんでした"
-          else
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
-              || warn "Homebrew を入れられませんでした"
-          fi
-          find_brew
-        fi
-      fi
-    elif [ "$dry_run" -eq 1 ]; then
-      planned+=("terminal-notifier（聞いてから brew install terminal-notifier）")
-    fi
-    if [ -n "$BREW" ] && [ "$dry_run" -eq 0 ]; then
-      if ask "terminal-notifier を入れますか。押すと承認の画面が開く通知に使います。入れない場合は、押しても画面が開かない通知になります"; then
-        "$BREW" install terminal-notifier || warn "terminal-notifier を入れられませんでした"
-        find_tn
-      fi
-    fi
-    if [ -z "$TN" ] && [ "$dry_run" -eq 0 ]; then
-      info "terminal-notifier が無いため、通知は osascript で出します（押しても画面は開きません）"
-    fi
-  fi
-
   if [ -z "$CLAUDE_BIN" ]; then
-    info "claude が見つからないため、週1回の見直しは登録しません（承認の画面とフックは使えます）"
+    info "claude が見つからないため、週1回の見直しは登録しません（フックは使えます）"
   fi
-  build_launchd_path
 
   if [ "$dry_run" -eq 1 ]; then
     if [ "${#planned[@]}" -eq 0 ]; then
@@ -768,10 +655,7 @@ if [ "$uninstall" -eq 1 ]; then
   # review-loop は旧版が登録した定期実行である。旧版から移ってきた環境のために外す。
   unregister_job review-loop
   for j in $SCHEDULE_JOBS; do unregister_job "${j%%:*}"; done
-  bootout_if_registered
-  if [ -e "$PLIST" ]; then
-    run rm "$PLIST"
-  fi
+  remove_legacy_server
   # フックはリンクを消す前に外す。スキル置き場を経由して登録したフックを、リンクの先で同じものと判定するためである。
   if python_usable; then
     for f in "${settings_files[@]}"; do
@@ -796,14 +680,13 @@ if [ "$uninstall" -eq 1 ]; then
       done
     done
   done
-  info "外しました。案の置き場所（${PROPOSALS_DIR}）と台帳（${STATE_DIR}）と見回りの範囲の設定ファイル（${PATROL_CONF}）は残しています。"
+  info "外しました。直したいことの記録（${CHANGES_LOG}）と否認・訂正リストの置き場所（${PROPOSALS_DIR}）と状態の置き場所（${STATE_DIR}）と見回りの範囲の設定ファイル（${PATROL_CONF}）は残しています。"
   exit 0
 fi
 
 # ==== 入れる ====
-# 1. 必要なものの確認（足りないものは聞いてから入れる）と、試しの通知
+# 1. 必要なものの確認（足りないものは聞いてから入れる）
 check_prerequisites
-check_notifier
 
 # 2. スキル
 for d in "${skill_dirs[@]}"; do
@@ -816,21 +699,11 @@ for d in "${skill_dirs[@]}"; do
   fi
 done
 
-# 5.（plist とログの置き場所に先に使う）案の置き場所と状態の置き場所
-run mkdir -p "$PROPOSALS_DIR" "$STATE_DIR"
+# 記録と否認・訂正リストと状態の置き場所
+run mkdir -p "$(dirname "$CHANGES_LOG")" "$PROPOSALS_DIR" "$STATE_DIR"
 
-# 3. launchd（承認の画面のサーバー）。承認なし（auto）では画面を使わないため、登録せず、登録済みなら外す。
-if [ "$APPROVAL_MODE" = auto ]; then
-  info "承認なし（CLAUDE_REVIEW_APPROVAL_MODE=auto）のため、承認の画面のサーバーを登録しません（設定: ${JOBS_CONF}）"
-  bootout_if_registered
-  if [ -e "$PLIST" ]; then
-    run rm "$PLIST"
-  fi
-else
-  write_plist
-  bootout_if_registered
-  run launchctl bootstrap "gui/$uid" "$PLIST"
-fi
+# 旧版の常駐サーバーを外す。
+remove_legacy_server
 
 # 3.5 定期実行
 # 旧版が登録した週1回の棚卸し（review-loop）は、週1回の見直しの3つに置き換わったため外す。
@@ -877,9 +750,4 @@ for f in "${settings_files[@]}"; do
 done
 
 info ""
-if [ "$APPROVAL_MODE" = auto ]; then
-  info "入れました（承認なし）。承認待ちは会話の開始時に件数が出ます。会話で「反映して」と伝えると反映します。"
-else
-  info "入れました。承認待ちの画面: http://127.0.0.1:$PORT/"
-fi
-info "通知が出ない場合は、README の「5. 通知の許可」と「困ったとき」を参照してください。"
+info "入れました。直したいことは会話の開始時に件数が出ます。"

@@ -76,16 +76,16 @@ cwd をレポートの置き場所（`REPORTS_ROOT/feedback-mining/`）にして
 <CLAUDE_LAUNCHER> -p "<依頼文>" --model opus --effort low --permission-mode default --allowedTools ... --disallowedTools ...
 ```
 
-依頼文: 「Skill feedback-mining を自動モードで実行する。対象の会話から利用者本人の発言だけを取り出したファイルの一覧は <extracted の一覧のパス>、レポートの出力先は <レポートのパス>。元の会話（jsonl）は読まない（権限で拒否している）。取り出したファイルの見出しにある元の会話のパスを、根拠として書く。否認リストは <承認待ちの置き場所>/rejections.md にある。決まりの案を作る前に読み、否認リストと同じ対象・同じ趣旨の案は作らない。利用者の環境だけの決まりは <上書きファイル> にある（無ければ飛ばす）。」
+依頼文: 「Skill feedback-mining を自動モードで実行する。対象の会話から利用者本人の発言だけを取り出したファイルの一覧は <extracted の一覧のパス>、レポートの出力先は <レポートのパス>。元の会話（jsonl）は読まない（権限で拒否している）。取り出したファイルの見出しにある元の会話のパスを、根拠として書く。否認リストは <否認リストと訂正リストの置き場所>/rejections.md にある。決まりの案を作る前に読み、否認リストと同じ対象・同じ趣旨の案は作らない。利用者の環境だけの決まりは <上書きファイル> にある（無ければ飛ばす）。」
 
 | 区分 | 規則 |
 | --- | --- |
-| 許可 | `Skill`、`Read(/<範囲>/**)`（各設定ディレクトリ・`~/.agents`・`REPORTS_ROOT`・`STATE_BASE`・承認待ちの置き場所・スキルの置き場所の直下にあるリンクの実体）、`Read(/<上書きファイル>)`、`Read(/<SKILL_AUDIT_STATE>/history.md)`、`Edit(/<REPORTS_ROOT>/feedback-mining/**)` |
-| 拒否 | `Read(/<HOME>/Library/CloudStorage/**)`、`CLAUDE_REVIEW_DENY_READ` の各場所の `Read(/<場所>/**)`、設定ディレクトリごとの `Edit(/<設定ディレクトリ>/**)`、`Edit(/<HOME>/Documents/**)` `Edit(/<HOME>/.agents/**)` `Edit(/<承認待ちの置き場所>/**)` `Edit(/<台帳の置き場所>/**)`、南京錠（`change-review/scripts/link-scopes.sh` の `guard_deny_rules`。安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳を、リンクの表記と実体のパスの両方で）、検問所として各設定ディレクトリの `projects` と `FEEDBACK_MINING_SOURCES` の各場所（表記と実体）の `Read(/<場所>/**/*.jsonl)` |
+| 許可 | `Skill`、`Read(/<範囲>/**)`（各設定ディレクトリ・`~/.agents`・`REPORTS_ROOT`・`STATE_BASE`・否認リストと訂正リストの置き場所・スキルの置き場所の直下にあるリンクの実体）、`Read(/<上書きファイル>)`、`Read(/<SKILL_AUDIT_STATE>/history.md)`、`Edit(/<REPORTS_ROOT>/feedback-mining/**)` |
+| 拒否 | `Read(/<HOME>/Library/CloudStorage/**)`、`CLAUDE_REVIEW_DENY_READ` の各場所の `Read(/<場所>/**)`、設定ディレクトリごとの `Edit(/<設定ディレクトリ>/**)`、`Edit(/<HOME>/Documents/**)` `Edit(/<HOME>/.agents/**)` `Edit(/<否認リストと訂正リストの置き場所>/**)` `Edit(/<台帳の置き場所>/**)`、南京錠（`change-review/scripts/link-scopes.sh` の `guard_deny_rules`。安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳を、リンクの表記と実体のパスの両方で）、検問所として各設定ディレクトリの `projects` と `FEEDBACK_MINING_SOURCES` の各場所（表記と実体）の `Read(/<場所>/**/*.jsonl)` |
 
 `--permission-mode default` を付け、settings.json の `defaultMode`（acceptEdits 等）で作業場所の中の編集が通らないようにする。`link-scopes.sh` を読み込めなければ、拒否の規則を作れないため起動せずに終了コード1で終わる。
 
-承認待ちの置き場所は `CLAUDE_REVIEW_PROPOSALS`（既定 `REPORTS_ROOT/proposals`）、判断の台帳の置き場所は `CLAUDE_REVIEW_STATE`（既定 `~/.local/state/claude-review-inbox`）である。台帳への書き込みを claude に許すと、画面のボタンを経ない承認を作れてしまうため拒否する。
+否認リストと訂正リストの置き場所は `CLAUDE_REVIEW_PROPOSALS`（既定 `REPORTS_ROOT/proposals`）、旧版から残る状態の置き場所は `CLAUDE_REVIEW_STATE`（既定 `~/.local/state/claude-review-inbox`）である。状態の置き場所と変更の記録（`CLAUDE_REVIEW_CHANGES_LOG`）への書き込みも拒否する。決まりの案は結果を読んだ会話のClaudeが`要確認`で記録する。承認は会話だけで受ける。
 
 `Edit(...)` の規則は Write ツールにも効く。規則の中のパスは `/` で始まる絶対パスの前にさらに `/` を付けた形（`//<HOME>/...`）になる。これは Claude Code の権限規則で絶対パスを表す書き方である。
 

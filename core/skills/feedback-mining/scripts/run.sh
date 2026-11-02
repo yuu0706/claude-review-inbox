@@ -57,7 +57,7 @@ for c in ${config_dirs[@]+"${config_dirs[@]}"}; do
 done
 # 会話の履歴を探すディレクトリ。コロン区切り。存在しないものは飛ばす。
 SOURCES="${FEEDBACK_MINING_SOURCES:-$default_sources}"
-# 承認待ちの置き場所・否認リスト・判断の台帳（claude-review-inbox）。
+# 否認・訂正リストの置き場所・旧版から残る状態（claude-review-inbox）。
 PROPOSALS_DIR="${CLAUDE_REVIEW_PROPOSALS:-$REPORTS_ROOT/proposals}"
 PROPOSALS_DIR="${PROPOSALS_DIR%/}"
 REJECTIONS="$PROPOSALS_DIR/rejections.md"

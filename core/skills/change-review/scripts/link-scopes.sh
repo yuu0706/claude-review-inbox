@@ -88,22 +88,10 @@ change_ledger_dir() {
   printf '%s\n' "${d%/}"
 }
 
-# 承認の進め方。環境変数 CLAUDE_REVIEW_APPROVAL_MODE、jobs.conf、既定（screen）の順に決め、screen か auto を出す。
-#   screen  承認あり。定期実行の修正・削除はすべて承認待ちにし、画面（承認の画面のサーバー）で承認する
-#   auto    承認なし。定期実行は承認が要らないと判断した変更を反映し、承認が要るものだけを承認待ちにして会話で承認する
-approval_mode() {
-  local m="${CLAUDE_REVIEW_APPROVAL_MODE:-}"
-  [ -n "$m" ] || m="$(lsc_jobs_conf CLAUDE_REVIEW_APPROVAL_MODE)"
-  case "$m" in
-    auto) printf 'auto\n' ;;
-    *) printf 'screen\n' ;;
-  esac
-}
-
 # 既定で書き換えを拒否するスクリプトの置き場所。フック（gitleaks-pre-commit.sh・tag-memory-repo.sh・SessionStart の
 # unread.sh・run-if-due.sh・session-trigger.sh）と、それらが読み込む部品、定期実行の起動スクリプトを含む。
 # 定期実行が自分の起動スクリプトを書き換えると、次の実行で拒否の規則そのものを外せるため、起動スクリプトも含める。
-GUARDED_PATHS_DEFAULT="security-rules/scripts:memory-audit/scripts:report-inbox/scripts:repo-patrol/scripts:secret-patrol/scripts:skill-audit/scripts:feedback-mining/scripts:change-review/scripts:skill-updates/scripts"
+GUARDED_PATHS_DEFAULT="security-rules/scripts:memory-audit/scripts:report-inbox/scripts:repo-patrol/scripts:secret-patrol/scripts:skill-audit/scripts:feedback-mining/scripts:change-review/scripts:skill-updates/scripts:weakness-review/scripts"
 
 # 書き換えを拒否する場所を「d<TAB>パス」（フォルダ）か「f<TAB>パス」（ファイル）で1行1件ずつ出力する。
 # リンクの表記と実体のパスの両方を出す。
@@ -156,6 +144,7 @@ guard_paths() {
         path_and_real "$c/$n" | sed 's/^/f	/'
       done
     done
+    path_and_real "${CLAUDE_REVIEW_CHANGES_LOG:-$HOME/.local/state/claude-reports/changes/log.md}" | sed 's/^/f	/'
     path_and_real "$(change_ledger_dir)" | sed 's/^/d	/'
   } | awk '!seen[$0]++'
   return 0

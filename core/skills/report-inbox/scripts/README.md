@@ -1,15 +1,15 @@
 # report-inbox scripts
 
-定期実行のジョブが `~/claude-reports/` に書いたレポートを一覧にし、未読を数え、既読にするスクリプトである。あわせて、定期実行のジョブの失敗（ログの ERROR と launchd の標準エラー）と、Skill `change-review` の承認待ちの件数を知らせる。
+定期実行のジョブが `~/claude-reports/` に書いたレポートを一覧にし、未読を数え、既読にするスクリプトである。あわせて、定期実行のジョブの失敗（ログの ERROR と launchd の標準エラー）と、Skill `change-review` の直したいことの未対応の件数を知らせる。
 
 ## ファイル
 
 | ファイル | 役割 |
 | --- | --- |
-| `lib.sh` | 共通定義（置き場所、レポートの列挙、既読の照合、失敗の判定、承認待ちの列挙）。各スクリプトが source する |
-| `unread.sh` | 承認待ちの件数、未読のレポート、未読の失敗を1行だけ標準出力へ出す。どれも無ければ何も出さない |
+| `lib.sh` | 共通定義（置き場所、レポートの列挙、既読の照合、失敗の判定、未対応の変更の列挙）。各スクリプトが source する |
+| `unread.sh` | 直したいことの未対応の件数、未読のレポート、未読の失敗を1行だけ標準出力へ出す。どれも無ければ何も出さない |
 | `mark-read.sh <レポートのパス...>` / `--all` / `--failures` / `--failure <ジョブ名>` | 既読にする。`--all` は現在あるレポートと全ジョブの失敗の知らせを既読にする |
-| `list.sh [--unread]` / `list.sh --failures` / `list.sh --proposals` | レポートを新しい順に一覧にする。`--failures` は未読の失敗を、`--proposals` は承認待ちを一覧にする |
+| `list.sh [--unread]` / `list.sh --failures` / `list.sh --changes` | レポートを新しい順に一覧にする。`--failures` は未読の失敗を、`--changes`は未対応の変更を一覧にする |
 | `test.sh` | 一時ディレクトリに偽のレポートを作って上記を検査する |
 
 ## 環境変数
@@ -18,13 +18,14 @@
 | --- | --- | --- |
 | `CLAUDE_REPORTS_ROOT` | `$HOME/claude-reports` | レポートの置き場所 |
 | `CLAUDE_REPORTS_STATE` | `$HOME/.local/state/claude-reports` | 既読の記録の置き場所（`report-inbox/read.txt`・`report-inbox/failure-read/`）。repo-patrol・memory-audit・feedback-mining の状態ディレクトリ（`<ジョブ名>/`）の親でもある |
+| `CLAUDE_REVIEW_CHANGES_LOG` | `$HOME/.local/state/claude-reports/changes/log.md` | 直したいことの記録 |
 | `SKILL_AUDIT_STATE` | `$HOME/.local/state/skill-audit` | skill-audit の状態ディレクトリ |
 
 失敗の判定に使う環境変数は、各ジョブのスクリプトが状態ディレクトリを決める変数と同じものである。
 
 ## レポートとして扱うもの
 
-`REPORTS_ROOT/<ジョブ名>/` の直下にあり、名前が `<YYYY-MM-DD>.md` または `<YYYY-MM-DD>-<連番>.md` のファイルである。下位のディレクトリ（`memory-audit/.snapshots/`・`memory-audit/.staging/` など）の中は数えない。ドット始まりのディレクトリはジョブとしても数えない。`REPORTS_ROOT` 直下のファイルも数えない。承認待ちの置き場所 `REPORTS_ROOT/proposals/` はジョブとして数えない（「承認待ち」の節）。
+`REPORTS_ROOT/<ジョブ名>/` の直下にあり、名前が `<YYYY-MM-DD>.md` または `<YYYY-MM-DD>-<連番>.md` のファイルである。下位のディレクトリ（`memory-audit/.snapshots/`・`memory-audit/.staging/` など）の中は数えない。ドット始まりのディレクトリはジョブとしても数えない。`REPORTS_ROOT` 直下のファイルも数えない。否認リスト・訂正リストと過去の案を置く`REPORTS_ROOT/proposals/`は、ジョブとして数えない。
 
 既読の記録 `read.txt` には、既読にしたレポートの絶対パス（シンボリックリンクを解決したもの）を1行ずつ書く。
 
@@ -39,16 +40,16 @@
 ```
 
 ```text
-承認待ち 2件（2026-10-02-01〜）・承認済み・未反映 1件。未読の結果: repo-patrol 1件（2026-10-07）。失敗: memory-audit（2026-10-05 10:30。ログ <パス>）
+直したいこと 2件（うち要確認 1件、memory-audit-2026-11-02-103000-01〜）。未読の結果: repo-patrol 1件（2026-10-07）。失敗: memory-audit（2026-10-05 10:30。ログ <パス>）
 失敗: skill-audit（2026-10-05 12:00。標準エラー <パス>）
 ```
 
-- 承認待ち（`pending`）があれば件数と最も古い id を、承認済み・未反映（`approved`）があれば件数を、先頭に出す。0件の項目は出さない。承認待ちは既読にできず、反映か却下で `status` が変わるまで出し続ける。
-- 件数は Skill `change-review` の `scripts/count.sh` で数える。`CHANGE_REVIEW_SCRIPTS`、`<unread.sh の場所>/../../change-review/scripts`（スキル置き場の change-review）、`~/.claude/skills/change-review/scripts` の順に探す。見つからなければ、`lib.sh` の `list_pending_proposals` で承認待ちだけを数える。
+- 未対応の変更があれば、件数・うち要確認の件数・最も古いIDを先頭へ出す。0件なら出さない。対応済みか見送りになるまで知らせる。
+- 件数はSkill `change-review`の`scripts/count.sh`で数える。`CHANGE_REVIEW_SCRIPTS`、隣の`change-review/scripts`、`~/.claude/skills/change-review/scripts`の順に探す。見つからなければ、`lib.sh`が同じ記録から数える。
 - 未読が1件のジョブは日付を、2件以上のジョブは最新の日付を添える。ジョブ名の順に並べる。
 - 各ジョブの未読をすべて数える。古い未読が残っている間は件数に含まれ続けるので、読んだものは `mark-read.sh` で既読にする。
 - 失敗は「失敗の判定」の規則で調べ、ジョブ名の順に並べる。日時は失敗の行のうち最も新しい時刻で、時刻の無い標準エラーの行だけのときはファイルの更新時刻を使う。ログと標準エラーの両方に失敗があれば両方のパスを出す。
-- SessionStart フックで毎回動くため、外部コマンドの起動を回数の決まった少数に抑える。レポートの集計では既読の照合に awk を1回、承認待ちの集計では awk と sort を1回ずつ起動する。失敗の判定では、既読の印より新しいログと標準エラーに限って awk などを起動する（test.sh で、200件のレポートに加え2000行のログと標準エラーを持つ3ジョブ、および2000件を超えるレポートと既読の記録を、それぞれ1.0秒以内に処理することを確かめている。しきい値は `REPORT_INBOX_TEST_TIME_LIMIT` で変えられる）。
+- SessionStart フックで毎回動くため、外部コマンドの起動を回数の決まった少数に抑える。レポートの集計では既読の照合に awk を1回、直したいことの集計では記録をまとめて読む。失敗の判定では、既読の印より新しいログと標準エラーに限って awk などを起動する（test.sh で、200件のレポートに加え2000行のログと標準エラーを持つ3ジョブ、および2000件を超えるレポートと既読の記録を、それぞれ1.0秒以内に処理することを確かめている。しきい値は `REPORT_INBOX_TEST_TIME_LIMIT` で変えられる）。
 - どんな失敗でも終了コード0で何も出さない。置き場所が無い、`lib.sh` が無い、既読の記録を読めない場合も同じである。
 
 SessionStart フックへの登録は、リポジトリの `install.sh` が行う。手で登録するときの例（`settings.json` の `hooks`）:
@@ -92,14 +93,18 @@ SessionStart フックへの登録は、リポジトリの `install.sh` が行�
 
 `$CLAUDE_REPORTS_STATE/report-inbox/failure-read/<ジョブ名>` に、1行目に既読にした時刻（`YYYY-MM-DD HH:MM:SS`）、2行目にその時点の標準エラーの行数を書く。標準エラーが切り詰められて行数が記録より少なくなったときは、先頭から数え直す。
 
-## 承認待ち
+## 直したいこと
 
-`REPORTS_ROOT/proposals/*.md`（`CLAUDE_REVIEW_PROPOSALS` で差し替えられる）は Skill `change-review` の承認待ちである。先頭の YAML の frontmatter に `id`・`status`（`pending` / `approved` / `hold` / `rejected` / `applied`）・`targets` を持つ。否認リスト `rejections.md` も同じ場所にあるが、承認待ちとしては数えない。
+記録は`$HOME/.local/state/claude-reports/changes/log.md`に置く。
+`CLAUDE_REVIEW_CHANGES_LOG`で差し替えられる。
+`## <日時> <ID>`から次の項目までを1件として読む。
+`- 状態: 未対応`だけを数える。
+`- 区分: 要確認（理由）`は、うち要確認の件数にも含める。
+最も古い項目は記録の日時で求める。
 
-- `unread.sh` は `status: pending` と `status: approved` を数える。`list.sh --proposals` は `pending` だけを出す。
-- 最も古いものは `id` の文字列の昇順で先頭のものとする。
-- frontmatter が壊れたもの（1行目が `---` でない、閉じの `---` が無い、`id` か `status` が無い）は数えず、標準エラーにも何も出さない。
-- 見出しは frontmatter の後で最初の `# ` で始まる行とする。`targets` は字下げした `- ` の並びと、`[a, b]` の1行の形を読む。
+`mark-read.sh`ではこの記録の状態を変えない。
+会話のClaudeがSkill `change-review`の手順で入れ、`changes.sh mark`で対応済みか見送りにする。
+旧来の`REPORTS_ROOT/proposals/*.md`は履歴として残し、集計しない。
 
 ## mark-read.sh
 
@@ -124,8 +129,9 @@ memory-audit / 2026-10-05 10:31 / <HOME>/.local/state/claude-reports/memory-audi
     [2026-10-05 10:31:05] ERROR: 精査が異常終了しました（終了コード 1）
 ```
 
-`--proposals` は承認待ちを `id` の昇順に「id / 見出し / targets」の形で出す。`targets` が複数あれば「, 」でつなぐ。`--unread`・`--failures` とは併用できない。
+`--changes`は未対応の変更を「ID / 直したいこと / 対象」の形で出す。`--proposals`も同じ意味で受け付ける。
+`--unread`・`--failures`とは併用できない。
 
 ```text
-2026-10-02-01 / skill-audit の「分割の現況」の表に5つのスキルを加える / <HOME>/.claude/skills/skill-audit/SKILL.md
+会話-2026-11-02-01 / skill-auditの分割の表を直す / <HOME>/.claude/skills/skill-audit/SKILL.md
 ```

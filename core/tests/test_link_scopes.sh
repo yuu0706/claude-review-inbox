@@ -89,8 +89,8 @@ out="$("$REPO/core/skills/skill-audit/scripts/run-audit.sh" --force --dry-run 2>
 common_checks skill-audit "$out" "$rc"
 allow_part="${out%%--disallowedTools*}"
 deny_part="${out#*--disallowedTools}"
-check "skill-audit: 自作のリンクの実体に Edit を許可する" '[ "$(count_arg "$allow_part" "Edit(/$OWN/**)")" -eq 1 ]'
-check "skill-audit: 自作のリンクの実体の Edit を拒否しない" '[ "$(count_arg "$deny_part" "Edit(/$OWN/**)")" -eq 0 ]'
+check "skill-audit: 自作のリンクの実体に Edit を許可しない" '[ "$(count_arg "$allow_part" "Edit(/$OWN/**)")" -eq 0 ]'
+check "skill-audit: 自作のリンクの実体の Edit を拒否する" '[ "$(count_arg "$deny_part" "Edit(/$OWN/**)")" -ge 1 ]'
 check "skill-audit: 外部のリンクの実体に Edit を許可しない" '[ "$(count_arg "$allow_part" "Edit(/$EXT/**)")" -eq 0 ]'
 check "skill-audit: 外部のリンクの実体の Edit を1回だけ拒否する" '[ "$(count_arg "$deny_part" "Edit(/$EXT/**)")" -eq 1 ]'
 check "skill-audit: change-review の実体に Edit を許可しない" '[ "$(count_arg "$allow_part" "Edit(/$CR_REAL/**)")" -eq 0 ]'
@@ -101,23 +101,6 @@ echo "== skill-audit の対象の判定"
 check "自作のリンクは対象" 'is_target ownskill'
 check "外部のリンク・実体の無いリンク・synced は対象外" '! is_target extskill && ! is_target broken && ! is_target synced'
 check "trash-skill.sh はリンクのスキルを移動しない" '! "$REPO/core/skills/skill-audit/scripts/trash-skill.sh" ownskill >/dev/null 2>&1 && [ -L "$SK/ownskill" ]'
-
-echo "== skill-audit: 自作のリンクの実体への修正は、承認が要るなら戻して承認待ちにする（偽の claude）"
-cat >"$HOME/.local/bin/claude" <<EOF
-#!/bin/bash
-N="\$(printf '%s\n' "\$@" | grep -o '/[A-Za-z0-9._/-]*/needs-approval.tsv' | head -1)"
-printf '%s\t%s\n' "$SK/ownskill" "判断に迷う" >"\$N"
-printf '# own changed\n' >"$OWN/SKILL.md"
-printf 'added\n' >"$OWN/new.md"
-exit 0
-EOF
-chmod +x "$HOME/.local/bin/claude"
-"$REPO/core/skills/skill-audit/scripts/run-audit.sh" --force >/dev/null 2>&1; rc=$?
-check "skill-audit: 終了コード0" '[ "$rc" -eq 0 ]'
-check "skill-audit: 既存の行の修正は実行前の版に戻す" '[ "$(cat "$OWN/SKILL.md")" = "# own" ]'
-check "skill-audit: 新しいファイルは残す" '[ -f "$OWN/new.md" ]'
-check "skill-audit: 修正の承認待ちを作る" 'grep -lq "ownskill/SKILL.md" "$HOME/claude-reports/proposals/"*.md 2>/dev/null </dev/null'
-check "skill-audit: リンクはリンクのまま残る" '[ -L "$SK/ownskill" ]'
 
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

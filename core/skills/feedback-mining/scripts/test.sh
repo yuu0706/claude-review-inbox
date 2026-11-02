@@ -101,7 +101,7 @@ for rule in "'$FAKE' '-p'" \
 done
 allow_part="${out%%--disallowedTools*}"
 check "許可側に範囲を付けない Read と任意のパスを読める Bash を含まない" '! printf "%s" "$allow_part" | grep -Fq "'"'"'Read'"'"'" && ! printf "%s" "$allow_part" | grep -q "Bash("'
-check "許可側に承認待ちの置き場所と台帳の Edit を含まない" '! printf "%s" "$allow_part" | grep -Fq "Edit(/$PDIR" && ! printf "%s" "$allow_part" | grep -Fq "Edit(/$LEDGER"'
+check "許可側に否認・訂正リストの置き場所と台帳の Edit を含まない" '! printf "%s" "$allow_part" | grep -Fq "Edit(/$PDIR" && ! printf "%s" "$allow_part" | grep -Fq "Edit(/$LEDGER"'
 check "許可に rm・mv・Write を含まない" '! has "Bash(rm" && ! has "Bash(mv" && ! has "Write"'
 check "dry-run は last-run を作らない" '[ ! -f "$STATE/last-run" ]'
 check "dry-run はレポートを作らない" '[ -z "$(ls "$RDIR")" ]'

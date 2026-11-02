@@ -1,6 +1,6 @@
 #!/bin/bash
-# install.sh の検査。一時の HOME を作り、launchctl と brew を偽のコマンドに差し替えて実行する。
-# 本物の HOME・launchctl・brew には触れない。
+# install.sh の検査。一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。
+# 本物の HOME・launchctl には触れない。
 set -u
 # 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
 ALT_DIR=.claude_alt
@@ -21,6 +21,7 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
 export CALLS="$WORK/calls.log"
+: >"$CALLS"
 export FAKE_LAUNCHD="$WORK/launchd-registered"
 cat >"$FAKEBIN/launchctl" <<'EOF'
 #!/bin/bash
@@ -32,39 +33,7 @@ case "$1" in
   bootout) rm -f "$FAKE_LAUNCHD/${2##*/}" ;;
 esac
 EOF
-cat >"$FAKEBIN/brew" <<'EOF'
-#!/bin/bash
-printf 'brew %s\n' "$*" >>"$CALLS"
-[ "$1" = "--prefix" ] && printf '%s\n' "$FAKE_TN_PREFIX"
-exit 0
-EOF
-# open はアプリとして起動したことを記録し、以後の terminal-notifier を成功させる（許可された状態を模す）。
-cat >"$FAKEBIN/open" <<'EOF'
-#!/bin/bash
-printf 'open %s\n' "$*" >>"$CALLS"
-echo opened >"$FAKE_TN_STATE"
-EOF
-# 偽の terminal-notifier。FAKE_TN_STATE の内容が allowed か opened なら成功し、それ以外は終了コード 3 で失敗する。
-# 置くのは試しの通知の検査のときだけ（tn_mode で置く）。
-cat >"$WORK/terminal-notifier" <<'EOF'
-#!/bin/bash
-printf 'terminal-notifier %s\n' "$*" >>"$CALLS"
-case "$(cat "$FAKE_TN_STATE" 2>/dev/null)" in allowed|opened) exit 0 ;; esac
-echo "Could not request notification permission: Notifications are not allowed for this application" >&2
-exit 3
-EOF
-chmod +x "$FAKEBIN/launchctl" "$FAKEBIN/brew" "$FAKEBIN/open" "$WORK/terminal-notifier"
-export FAKE_TN_PREFIX="$WORK/Cellar/terminal-notifier/3.1.0"
-export FAKE_TN_STATE="$WORK/tn-state"
-mkdir -p "$FAKE_TN_PREFIX/terminal-notifier.app"
-# $1: allowed=許可済み / denied=アプリとして起動するまで失敗 / never=起動しても失敗
-tn_mode() {
-  ln -sfn "$WORK/terminal-notifier" "$FAKEBIN/terminal-notifier"
-  echo "$1" >"$FAKE_TN_STATE"
-  if [ "$1" = "never" ]; then
-    printf '#!/bin/bash\nprintf "open %%s\\n" "$*" >>"$CALLS"\n' >"$FAKEBIN/open"
-  fi
-}
+chmod +x "$FAKEBIN/launchctl"
 # 検査の側では jq を使う。install.sh からは使わない（呼ばれたら CALLS に残して失敗する）。
 JQ="$(command -v jq)"
 if [ -z "$JQ" ]; then
@@ -73,7 +42,7 @@ if [ -z "$JQ" ]; then
 fi
 jq() { "$JQ" "$@"; }
 printf '#!/bin/bash\nprintf "jq %%s\\n" "$*" >>"$CALLS"\nexit 127\n' >"$FAKEBIN/jq"
-# 必要なものの確認: 本物の xcode-select・/usr/bin/python3・Homebrew の場所・claude を見ないように差し替える。
+# 必要なものの確認: 本物の xcode-select・/usr/bin/python3・claude を見ないように差し替える。
 FAKE_CLT="$WORK/clt"
 mkdir -p "$FAKE_CLT/usr/bin"
 printf '#!/bin/bash\n' >"$FAKE_CLT/usr/bin/python3"
@@ -83,16 +52,13 @@ printf '#!/bin/bash\nexit 0\n' >"$FAKEBIN/claude"
 chmod +x "$FAKEBIN/jq" "$FAKE_CLT/usr/bin/python3" "$WORK/xcode-select" "$WORK/python3" "$FAKEBIN/claude"
 export CLAUDE_REVIEW_XCODE_SELECT="$WORK/xcode-select"
 export CLAUDE_REVIEW_SYSTEM_PYTHON="$WORK/python3"
-export CLAUDE_REVIEW_BREW_PATHS=""
 export CLAUDE_REVIEW_CLAUDE_PATHS=""
-export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/no-brew-installer"
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # 偽の HOME。~/.claude/skills は2つ目の設定ディレクトリの skills へのリンクにする（設定ディレクトリを2つ持つ環境と同じ形）。
 export HOME="$WORK/home"
 repo_skills() { local s; for s in "$REPO"/core/skills/*; do [ -d "$s" ] && printf '%s\n' "$s"; done; }
-unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF \
-  CLAUDE_REVIEW_APPROVAL_MODE
+unset CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PYTHON XDG_CONFIG_HOME CLAUDE_REVIEW_CONFIG_DIRS CLAUDE_REVIEW_JOBS_CONF
 # 2つ目の設定ディレクトリは、共通の設定ファイル（jobs.conf）で指定する。
 mkdir -p "$HOME/.config/claude-review-inbox"
 printf 'CLAUDE_REVIEW_CONFIG_DIRS=~/.claude:~/%s\n' "$ALT_DIR" >"$HOME/.config/claude-review-inbox/jobs.conf"
@@ -140,9 +106,8 @@ out="$("$REPO/install.sh" --dry-run 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "HOME が変わらない" '[ "$(tree_sig)" = "$before" ]'
-check "launchctl・brew を呼ばない" '[ ! -s "$CALLS" ]'
-check "試しの通知の操作は表示だけにする" 'printf "%s" "$out" | grep -q "^\[dry-run\] （terminal-notifier があれば）試しの通知"'
-check "行う操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] ln -s $REPO/core/skills/change-review" && printf "%s" "$out" | grep -q "^  - terminal-notifier（聞いてから brew install terminal-notifier）"'
+check "launchctl を呼ばない" '[ ! -s "$CALLS" ]'
+check "行う操作を表示する" 'printf "%s" "$out" | grep -q "^\[dry-run\] ln -s $REPO/core/skills/change-review"'
 check "jobs.conf の2つ目の設定ディレクトリにもフックを足す" 'printf "%s" "$out" | grep -Fq "フックを足します: $HOME/${ALT_DIR}/settings.json"'
 out="$(CLAUDE_REVIEW_JOBS_CONF="$WORK/no-jobs.conf" "$REPO/install.sh" --dry-run 2>&1)"
 check "指定が無ければ ~/${ALT_DIR} があっても ~/.claude だけを使う" '! printf "%s" "$out" | grep -Fq "${ALT_DIR}/settings.json" && printf "%s" "$out" | grep -Fq "フックを足します: $HOME/.claude/settings.json"'
@@ -152,7 +117,6 @@ out="$("$REPO/install.sh" --yes 2>&1)"
 rc=$?
 printf '%s\n' "$out" | tail -3
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "brew で terminal-notifier を入れる" 'grep -Fxq "brew install terminal-notifier" "$CALLS"'
 check "install.sh は jq を呼ばない" '! grep -q "^jq" "$CALLS"'
 check "change-review がリポジトリへのリンクになる" '[ -L "$S2/change-review" ] && [ "$(readlink "$S2/change-review")" = "$REPO/core/skills/change-review" ]'
 trashed="$(ls -d "$S2/.trash/"*-change-review 2>/dev/null)"
@@ -171,17 +135,14 @@ done
 check "review-loop を置かない" '[ ! -e "$S2/review-loop" ] && [ ! -L "$S2/review-loop" ]'
 check "--yes では見回りの範囲を「入れない・見回らない」で書く" 'grep -qx "PERSONAL_FOLDERS=no" "$CONF" && grep -qx "REPO_ROOTS=" "$CONF"'
 check "他のスキルに触れない" '[ -d "$S2/other-skill" ] && [ ! -L "$S2/other-skill" ]'
-check "plist を作る" '[ -f "$PLIST" ] && plutil -lint "$PLIST" >/dev/null'
-check "plist のラベル・サーバー・常駐の設定" '[ "$(plutil -extract Label raw "$PLIST")" = "$LABEL" ] && [ "$(plutil -extract ProgramArguments.1 raw "$PLIST")" = "$REPO/core/server/inbox_server.py" ] && [ "$(plutil -extract ProgramArguments.0 raw "$PLIST")" = "$WORK/python3" ] && [ "$(plutil -extract RunAtLoad raw "$PLIST")" = "true" ] && [ "$(plutil -extract KeepAlive raw "$PLIST")" = "true" ] && [ "$(plutil -extract EnvironmentVariables.CLAUDE_REVIEW_PORT raw "$PLIST")" = "8010" ]'
-check "ログの置き場所を状態の置き場所にする" '[ "$(plutil -extract StandardOutPath raw "$PLIST")" = "$HOME/.local/state/claude-review-inbox/server.log" ]'
-check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
-check "未登録なら bootout しない" '! grep -q "launchctl bootout" "$CALLS"'
+check "サーバーの plist を作らない" '[ ! -e "$PLIST" ]'
+check "サーバーを登録せず、未登録なら bootout しない" '! grep -q "^launchctl" "$CALLS"'
 check "両方の settings.json に4つのフックを1つずつ足す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "4" ] && [ "$(hook_count "$HOME/${ALT_DIR}/settings.json")" = "4" ] && each_hook_once "$HOME/.claude/settings.json"'
 check "旧版のフック（session-start.sh）は足さない" '[ "$(hook_count "$HOME/.claude/settings.json" "$LEGACY_HOOK")" = "0" ]'
 check "既存の設定を消さない" '[ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ] && [ "$(jq -r .theme "$HOME/${ALT_DIR}/settings.json")" = "dark" ]'
 check "書き換える前に settings.json.bak-<日時> を残す" '[ "$(ls "$HOME/.claude/"settings.json.bak-* | wc -l | tr -d " ")" = "1" ] && grep -q "/other/hook.sh" "$HOME/.claude/"settings.json.bak-* && ! grep -q "unread.sh" "$HOME/.claude/"settings.json.bak-*'
-check "案と状態の置き場所を作る" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
-check "最後に URL と通知の許可の案内を出す" 'printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/" && printf "%s" "$out" | grep -q "5. 通知の許可"'
+check "記録・否認と訂正リスト・状態の置き場所を作る" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-reports/changes" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
+check "最後に会話の開始時の案内を出す" 'printf "%s" "$out" | grep -Fq "入れました。直したいことは会話の開始時に件数が出ます。"'
 
 echo "== 2回実行しても同じ"
 sig1="$(tree_sig)"
@@ -190,7 +151,7 @@ sig1="$(tree_sig)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "HOME の中身が同じ（退避・バックアップが増えない）" '[ "$(tree_sig)" = "$sig1" ]'
-check "登録済みなら bootout してから bootstrap する" '[ "$(cat "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
+check "サーバーの登録を行わない" '! grep -q "^launchctl" "$CALLS"'
 
 echo "== 旧版の後始末（review-loop のリンクと session-start.sh のフック）"
 "$REPO/install.sh" --uninstall >/dev/null 2>&1
@@ -230,12 +191,12 @@ out="$("$REPO/install.sh" --uninstall 2>&1)"
 rc=$?
 printf '%s\n' "$out" | tail -5
 check "終了コード0" '[ "$rc" -eq 0 ]'
-check "launchd から外す" 'grep -Fxq "launchctl bootout gui/$(id -u)/$LABEL" "$CALLS" && [ ! -e "$FAKE_LAUNCHD/$LABEL" ]'
+check "サーバーが無ければ launchctl を呼ばない" '! grep -q "^launchctl" "$CALLS"'
 check "plist を消す" '[ ! -e "$PLIST" ]'
 check "リポジトリを指すリンクだけを消す" '[ -z "$(find "$S2" -maxdepth 1 -type l)" ] && [ -d "$S2/other-skill" ] && [ -L "$HOME/.claude/skills" ]'
 check "足したフックを消し、他の設定は残す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "0" ] && [ "$(jq -r .model "$HOME/.claude/settings.json")" = "opus" ] && [ "$(jq -r ".hooks.SessionStart[0].hooks[0].command" "$HOME/.claude/settings.json")" = "/other/hook.sh" ]'
 check "退避したものは戻さず、戻し方を表示する" '[ -d "$(ls -d "$S2/.trash/"*-change-review)" ] && printf "%s" "$out" | grep -Fq "mv '"'"'$(ls -d "$S2/.trash/"*-change-review)'"'"' '"'"'$S2/change-review'"'"'"'
-check "案と状態の置き場所は残す" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
+check "記録・否認と訂正リスト・状態の置き場所は残す" '[ -d "$HOME/claude-reports/proposals" ] && [ -d "$HOME/.local/state/claude-reports/changes" ] && [ -d "$HOME/.local/state/claude-review-inbox" ]'
 sig3="$(tree_sig)"
 "$REPO/install.sh" --uninstall >/dev/null 2>&1
 rc=$?
@@ -274,72 +235,57 @@ ln -s "$WORK/elsewhere/change-review" "$S2/change-review"
 check "--uninstall は他を指すリンクを外さない" '[ -L "$S2/change-review" ]'
 mv -f "$S2/change-review" "$WORK/elsewhere-link"
 
-echo "== 試しの通知: 許可済み"
-tn_mode allowed
-: >"$CALLS"
-out="$("$REPO/install.sh" 2>&1)"
-rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "brew install を呼ばない" '! grep -q "^brew install" "$CALLS"'
-check "試しの通知を1回出す" '[ "$(grep -c "^terminal-notifier " "$CALLS")" = "1" ] && grep -Fq "terminal-notifier -title claude-review-inbox -message claude-review-inbox の通知の確認です" "$CALLS"'
-check "アプリとして起動しない" '! grep -q "^open" "$CALLS"'
+# 旧版の plist を、削除済みのサーバーのパスで模す。
+legacy_plist() {
+  /usr/bin/python3 -B - "$1" "$2" "$3" <<'PYTEST'
+import os
+import plistlib
+import sys
+path, label, script = sys.argv[1:]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "wb") as f:
+    plistlib.dump({"Label": label, "ProgramArguments": ["/usr/bin/python3", script]}, f)
+PYTEST
+  mkdir -p "$FAKE_LAUNCHD"
+  touch "$FAKE_LAUNCHD/$2"
+}
 
-echo "== 試しの通知: アプリとして起動すると成功する"
-tn_mode denied
-: >"$CALLS"
-out="$("$REPO/install.sh" 2>&1)"
-rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "brew --prefix で求めた場所のアプリを open -W -a で起動する" 'grep -Fxq "open -W -a $FAKE_TN_PREFIX/terminal-notifier.app --args -title claude-review-inbox -message claude-review-inbox の通知の確認です" "$CALLS"'
-check "起動の後にもう一度試す" '[ "$(grep -c "^terminal-notifier " "$CALLS")" = "2" ]'
-check "成功を表示し、許可の手順は出さない" 'printf "%s" "$out" | grep -q "試しの通知を出しました（terminal-notifier をアプリとして起動した後）" && ! printf "%s" "$out" | grep -q "システム設定"'
-
-echo "== 試しの通知: 起動しても失敗する"
-tn_mode never
-: >"$CALLS"
-out="$("$REPO/install.sh" 2>&1)"
-rc=$?
-check "終了コード0で続ける" '[ "$rc" -eq 0 ] && [ -f "$PLIST" ] && grep -q "^launchctl bootstrap" "$CALLS"'
-check "起動は1回だけ" '[ "$(grep -c "^open" "$CALLS")" = "1" ] && [ "$(grep -c "^terminal-notifier " "$CALLS")" = "2" ]'
-check "システム設定で許可する手順を表示する" 'printf "%s" "$out" | grep -q "「システム設定」の「通知」を開く"'
-
-echo "== 試しの通知: --dry-run では出さない"
-: >"$CALLS"
-"$REPO/install.sh" --dry-run >/dev/null 2>&1
-check "terminal-notifier と open を呼ばない" '! grep -q "^terminal-notifier\|^open" "$CALLS"'
-mv -f "$FAKEBIN/terminal-notifier" "$WORK/terminal-notifier-link.unused"
-
-echo "== 承認なし（auto）では承認の画面のサーバーを登録しない"
+echo "== 旧版のサーバーを外す"
 JC="$HOME/.config/claude-review-inbox/jobs.conf"
 cp -p "$JC" "$WORK/jobs.conf.saved"
-"$REPO/install.sh" >/dev/null 2>&1
-check "承認あり（既定）では plist を置いている" '[ -f "$PLIST" ] && [ -e "$FAKE_LAUNCHD/$LABEL" ]'
-printf 'CLAUDE_REVIEW_APPROVAL_MODE=auto\n' >>"$JC"
+FOREIGN_LABEL=com.other.claude-review-inbox
+FOREIGN_PLIST="$HOME/Library/LaunchAgents/$FOREIGN_LABEL.plist"
+OTHER_LABEL=com.other-job
+OTHER_PLIST="$HOME/Library/LaunchAgents/$OTHER_LABEL.plist"
+legacy_plist "$FOREIGN_PLIST" "$FOREIGN_LABEL" "$WORK/other-repo/core/server/retired.py"
+legacy_plist "$OTHER_PLIST" "$OTHER_LABEL" "$REPO/core/skills/memory-audit/scripts/run.sh"
+legacy_plist "$PLIST" "$LABEL" "$REPO/core/server/retired.py"
+ALT_LABEL=com.previous.claude-review-inbox
+ALT_PLIST="$HOME/Library/LaunchAgents/$ALT_LABEL.plist"
+legacy_plist "$ALT_PLIST" "$ALT_LABEL" "$OLDREPO/core/server/retired.py"
+before="$(tree_sig)"
 : >"$CALLS"
+out="$("$REPO/install.sh" --dry-run 2>&1)"
+check "--dry-run は旧版を外す操作を表示するだけ" '[ "$(tree_sig)" = "$before" ] && [ ! -s "$CALLS" ] && printf "%s" "$out" | grep -Fq "launchctl bootout gui/$(id -u)/$LABEL" && printf "%s" "$out" | grep -Fq "rm $PLIST"'
 out="$("$REPO/install.sh" 2>&1)"
 rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "登録済みのサーバーを外し、plist を消す" 'grep -Fxq "launchctl bootout gui/$(id -u)/$LABEL" "$CALLS" && [ ! -e "$PLIST" ] && [ ! -e "$FAKE_LAUNCHD/$LABEL" ]'
-check "サーバーを登録しない" '! grep -q "^launchctl bootstrap gui/$(id -u) $PLIST" "$CALLS"'
-check "フックは足す" 'each_hook_once "$HOME/.claude/settings.json"'
-check "画面の URL ではなく会話で承認する案内を出す" '! printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/" && printf "%s" "$out" | grep -Fq "入れました（承認なし）"'
-out="$("$REPO/install.sh" --dry-run 2>&1)"
-check "--dry-run でも plist を書く操作を出さない" '! printf "%s" "$out" | grep -q "plist を書きます" && ! printf "%s" "$out" | grep -q "launchctl bootstrap gui/$(id -u) $PLIST"'
-out="$(CLAUDE_REVIEW_APPROVAL_MODE=screen "$REPO/install.sh" 2>&1)"
-check "環境変数が jobs.conf より優先する" '[ -f "$PLIST" ] && printf "%s" "$out" | grep -Fq "http://127.0.0.1:8010/"'
+check "登録済みのサーバーを外し、plist を消す" '[ "$rc" -eq 0 ] && grep -Fxq "launchctl bootout gui/$(id -u)/$LABEL" "$CALLS" && [ ! -e "$PLIST" ] && [ ! -e "$FAKE_LAUNCHD/$LABEL" ]'
+check "別のラベルの旧版も外す" 'grep -Fxq "launchctl bootout gui/$(id -u)/$ALT_LABEL" "$CALLS" && [ ! -e "$ALT_PLIST" ] && [ ! -e "$FAKE_LAUNCHD/$ALT_LABEL" ]'
+check "他のリポジトリと定期実行には触れない" '[ -f "$FOREIGN_PLIST" ] && [ -e "$FAKE_LAUNCHD/$FOREIGN_LABEL" ] && [ -f "$OTHER_PLIST" ] && [ -e "$FAKE_LAUNCHD/$OTHER_LABEL" ]'
+check "サーバーを登録せず、フックを足す" '! grep -q "^launchctl bootstrap" "$CALLS" && each_hook_once "$HOME/.claude/settings.json"'
+: >"$CALLS"
+"$REPO/install.sh" >/dev/null 2>&1
+check "2回目は launchctl を呼ばない" '! grep -q "^launchctl" "$CALLS"'
+legacy_plist "$PLIST" "$LABEL" "$REPO/core/server/retired.py"
+: >"$CALLS"
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
+check "--uninstall でも旧版のサーバーだけを外す" 'grep -Fxq "launchctl bootout gui/$(id -u)/$LABEL" "$CALLS" && [ ! -e "$PLIST" ] && [ -f "$FOREIGN_PLIST" ] && [ -f "$OTHER_PLIST" ]'
 cp -p "$WORK/jobs.conf.saved" "$JC"
 
 echo "== 不明な引数"
 "$REPO/install.sh" --nosuch >/dev/null 2>&1
 rc=$?
 check "終了コード2" '[ "$rc" -eq 2 ]'
-
-echo "== terminal-notifier も brew も無い"
-rm -f "$FAKEBIN/brew"
-: >"$CALLS"
-out="$("$REPO/install.sh" 2>&1)"
-rc=$?
-check "osascript で出すと表示して続ける" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -q "terminal-notifier が無いため、通知は osascript で出します" && [ -f "$PLIST" ] && [ ! -e "$WORK/no-brew-installer.called" ]'
 
 echo "== --with-local は不要になった"
 sig="$(tree_sig)"
@@ -352,6 +298,12 @@ check "HOME を変えず外部のコマンドを呼ばない" '[ "$(tree_sig)" =
 out="$("$REPO/install.sh" --dry-run --with-local 2>&1)"
 rc=$?
 check "--dry-run でも終了コード2" '[ "$rc" -eq 2 ]'
+
+echo "== 記録の置き場所の差し替え"
+out="$(CLAUDE_REVIEW_CHANGES_LOG="$WORK/custom-changes/log.md" "$REPO/install.sh" --yes 2>&1)"
+rc=$?
+check "指定した記録の親ディレクトリを作る" '[ "$rc" -eq 0 ] && [ -d "$WORK/custom-changes" ]'
+check "記録自体は追記のときに作る" '[ ! -e "$WORK/custom-changes/log.md" ]'
 
 echo
 printf 'RESULT: pass=%d fail=%d\n' "$pass" "$fail"

@@ -1,7 +1,6 @@
 #!/bin/bash
-# install.sh の「必要なものの確認」の検査。一時の HOME を作り、xcode-select・/usr/bin/python3・brew・
-# Homebrew の公式の手順・terminal-notifier・claude・launchctl を偽のコマンドに差し替えて実行する。
-# 本物の HOME・launchctl・brew・xcode-select・curl・claude・terminal-notifier・osascript には触れない。
+# install.sh の「必要なものの確認」の検査。一時の HOME を作る。
+# xcode-select・/usr/bin/python3・claude・launchctl を偽のコマンドに差し替え、本物の HOME には触れない。
 set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
@@ -17,7 +16,6 @@ ng() { fail=$((fail + 1)); printf 'FAIL: %s\n' "$1"; }
 check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 
 FAKEBIN="$WORK/bin"
-HB="$WORK/homebrew/bin"
 CLT="$WORK/clt"
 mkdir -p "$FAKEBIN" "$CLT/usr/bin"
 export CALLS="$WORK/calls.log"
@@ -54,45 +52,23 @@ if [ -f "$FAKE_STATE/py-old" ] && [ "$*" = "-B -c import sys; print(sys.version_
 fi
 exec /usr/bin/python3 "$@"
 EOF
-# 偽の brew。install terminal-notifier で、同じフォルダに偽の terminal-notifier を置く。
-cat >"$WORK/brew" <<'EOF'
-#!/bin/bash
-printf 'brew %s\n' "$*" >>"$CALLS"
-if [ "$1" = "install" ] && [ "$2" = "terminal-notifier" ]; then
-  d="$(dirname "$0")"
-  printf '#!/bin/bash\nprintf "terminal-notifier %%s\\n" "$*" >>"$CALLS"\n' >"$d/terminal-notifier"
-  chmod +x "$d/terminal-notifier"
-fi
-exit 0
-EOF
-# 偽の Homebrew の公式の手順。偽の brew を HB に置く。
-cat >"$WORK/brew-installer" <<EOF
-#!/bin/bash
-printf 'brew-installer\n' >>"\$CALLS"
-mkdir -p "$HB"
-cp "$WORK/brew" "$HB/brew"
-chmod +x "$HB/brew"
-EOF
 printf '#!/bin/bash\nprintf "claude %%s\\n" "$*" >>"$CALLS"\n' >"$WORK/claude"
 # 検査の側では jq を使う。install.sh からは使わない（呼ばれたら CALLS に残して失敗する）。
 JQ="$(command -v jq)"
 [ -n "$JQ" ] || { echo "jq が無いため検査できません"; exit 1; }
 printf '#!/bin/bash\nprintf "jq %%s\\n" "$*" >>"$CALLS"\nexit 127\n' >"$FAKEBIN/jq"
-chmod +x "$FAKEBIN/launchctl" "$WORK/xcode-select" "$CLT/usr/bin/python3" "$WORK/python3" "$WORK/brew" \
-  "$WORK/brew-installer" "$WORK/claude" "$FAKEBIN/jq"
+chmod +x "$FAKEBIN/launchctl" "$WORK/xcode-select" "$CLT/usr/bin/python3" "$WORK/python3" "$WORK/claude" "$FAKEBIN/jq"
 
 export PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin"
 export CLAUDE_REVIEW_XCODE_SELECT="$WORK/xcode-select"
 export CLAUDE_REVIEW_SYSTEM_PYTHON="$WORK/python3"
-export CLAUDE_REVIEW_BREW_PATHS="$HB/brew"
-export CLAUDE_REVIEW_BREW_INSTALLER="$WORK/brew-installer"
-unset CLAUDE_REVIEW_PYTHON CLAUDE_REVIEW_LABEL CLAUDE_REVIEW_PORT
+unset CLAUDE_REVIEW_PYTHON CLAUDE_REVIEW_LABEL
 JOB_PLIST_NAME="com.$(id -un | tr . -).memory-audit.plist"
 unset XDG_CONFIG_HOME
 
-# 状態を作り直す。引数: clt / brew / tn / claude のうち、ある状態にするもの。
+# 状態を作り直す。引数: clt / claude のうち、ある状態にするもの。
 setup() {
-  rm -rf "$WORK/home" "$WORK/homebrew" "$FAKE_LAUNCHD" "$FAKE_STATE"
+  rm -rf "$WORK/home" "$FAKE_LAUNCHD" "$FAKE_STATE"
   mkdir -p "$FAKE_STATE" "$WORK/home/.claude"
   export HOME="$WORK/home"
   printf '{"model":"opus"}\n' >"$HOME/.claude/settings.json"
@@ -104,8 +80,6 @@ setup() {
   for a in "$@"; do
     case "$a" in
       clt) touch "$FAKE_STATE/clt" ;;
-      brew) mkdir -p "$HB" && cp "$WORK/brew" "$HB/brew" ;;
-      tn) mkdir -p "$HB" && printf '#!/bin/bash\nprintf "terminal-notifier %%s\\n" "$*" >>"$CALLS"\n' >"$HB/terminal-notifier" && chmod +x "$HB/terminal-notifier" ;;
       claude) mkdir -p "$HOME/.local/bin" && cp "$WORK/claude" "$HOME/.local/bin/claude" \
         && export CLAUDE_REVIEW_CLAUDE_PATHS="$HOME/.local/bin/claude" ;;
     esac
@@ -133,23 +107,21 @@ PY
 called() { grep -q "$1" "$CALLS"; }
 asked() { printf '%s' "$out" | grep -q "$1"; }
 hook_count() { "$JQ" --arg c "$REPO/core/skills/report-inbox/scripts/unread.sh" '[.hooks.SessionStart[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
-plist_path() { plutil -extract EnvironmentVariables.PATH raw "$1"; }
-SERVER_PLIST() { printf '%s' "$HOME/Library/LaunchAgents/com.$(id -un | tr . -).claude-review-inbox.plist"; }
+LEGACY_PLIST() { printf '%s' "$HOME/Library/LaunchAgents/com.$(id -un | tr . -).claude-review-inbox.plist"; }
 
 echo "== 全部そろっているとき"
-setup clt brew tn claude
+setup clt claude
 out="$(tty_install "" --no-schedule)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "何も聞かない" '! asked "\[y/N\]"'
 check "確認の結果を表で出す" 'asked "^必要なものの確認:" && asked "Xcode のコマンドラインツール（必須）: あり" && asked "claude（週1回の見直しに必要）: あり"'
-check "何も入れない" '! called "xcode-select --install" && ! called "brew-installer" && ! called "^brew install"'
-check "plist の PATH に claude と brew のフォルダが入る" 'p="$(plist_path "$(SERVER_PLIST)")"; [ "${p%%:*}" = "$HOME/.local/bin" ] && case ":$p:" in *":$HB:"*) true ;; *) false ;; esac'
+check "何も入れない" '! called "xcode-select --install"'
 out="$(tty_install $'y\n')"
 check "claude があれば週1回の見直しを聞き、y なら登録する" 'asked "週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか" && [ -f "$HOME/Library/LaunchAgents/$JOB_PLIST_NAME" ]'
 
 echo "== コマンドラインツールが無い: y"
-setup brew tn claude
+setup claude
 out="$(tty_install $'y\n')"
 rc=$?
 check "終了コード2" '[ "$rc" -eq 2 ]'
@@ -159,97 +131,55 @@ check "/usr/bin/python3 を実行しない" '! called "^python3"'
 check "何も置かない" '[ ! -d "$HOME/Library/LaunchAgents" ] && ! called "^launchctl"'
 
 echo "== コマンドラインツールが無い: N"
-setup brew tn claude
+setup claude
 out="$(tty_install $'n\n')"
 rc=$?
 check "終了コード2" '[ "$rc" -eq 2 ]'
 check "xcode-select --install を呼ばない" '! called "xcode-select --install"'
-check "サーバーが動かない旨と入れ方を出す" 'asked "サーバーが動きません" && asked "xcode-select --install を実行し"'
+check "フックを設定できない旨と入れ方を出す" 'asked "フックを設定できません" && asked "xcode-select --install を実行し"'
 check "/usr/bin/python3 を実行しない" '! called "^python3"'
 
 echo "== コマンドラインツールが無い: 非端末"
-setup brew tn claude
+setup claude
 out="$("$REPO/install.sh" </dev/null 2>&1)"
 rc=$?
 check "終了コード2で、入れずに入れ方を出す" '[ "$rc" -eq 2 ] && ! called "xcode-select --install" && asked "xcode-select --install を実行し" && ! called "^python3"'
 
 echo "== コマンドラインツールが無い: --yes"
-setup brew tn claude
+setup claude
 out="$("$REPO/install.sh" --yes </dev/null 2>&1)"
 rc=$?
 check "聞かずに xcode-select --install を呼び、終了コード2" '[ "$rc" -eq 2 ] && called "^xcode-select --install" && ! asked "\[y/N\]" && ! called "^python3"'
 
 echo "== コマンドラインツールが無い: --dry-run"
-setup brew tn claude
+setup claude
 out="$("$REPO/install.sh" --dry-run --yes </dev/null 2>&1)"
 rc=$?
 check "入れるものに挙げ、何も入れずに終了コード2" '[ "$rc" -eq 2 ] && asked "  - Xcode のコマンドラインツール（xcode-select --install）" && ! called "xcode-select --install" && ! called "^python3" && [ ! -d "$HOME/Library/LaunchAgents" ]'
 
 echo "== CLAUDE_REVIEW_PYTHON を指定したときはコマンドラインツールを求めない"
-setup brew tn claude
+setup claude
 out="$(CLAUDE_REVIEW_PYTHON=/usr/bin/python3 "$REPO/install.sh" --no-schedule </dev/null 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ] && asked "Xcode のコマンドラインツール（必須）: 不要" && ! called "xcode-select"'
 
 echo "== Python が古い"
-setup clt brew tn claude
+setup clt claude
 touch "$FAKE_STATE/py-old"
 out="$("$REPO/install.sh" </dev/null 2>&1)"
 rc=$?
 check "終了コード2で、理由と CLAUDE_REVIEW_PYTHON の案内を出す" '[ "$rc" -eq 2 ] && asked "Python 3.9 以上（必須）: 古い" && asked "CLAUDE_REVIEW_PYTHON" && [ ! -d "$HOME/Library/LaunchAgents" ]'
 
-echo "== Homebrew も terminal-notifier も無い: y, y"
-setup clt claude
-out="$(tty_install $'y\ny\n' --no-schedule)"
-rc=$?
-check "終了コード0" '[ "$rc" -eq 0 ]'
-check "管理者のパスワードの案内を問いより前に出す" '[ "$(printf "%s" "$out" | grep -n "管理者のパスワード" | head -1 | cut -d: -f1)" -lt "$(printf "%s" "$out" | grep -n "Homebrew を入れますか" | cut -d: -f1)" ]'
-check "Homebrew の公式の手順を呼ぶ" 'called "^brew-installer"'
-check "入れた brew で terminal-notifier を入れる" 'called "^brew install terminal-notifier" && [ -x "$HB/terminal-notifier" ]'
-check "入れた terminal-notifier で試しの通知を出す" 'called "^terminal-notifier -title"'
-check "plist の PATH に入れた brew のフォルダが入る" 'case ":$(plist_path "$(SERVER_PLIST)"):" in *":$HB:"*) true ;; *) false ;; esac'
-
-echo "== Homebrew も terminal-notifier も無い: N"
-setup clt claude
-out="$(tty_install $'n\n' --no-schedule)"
-rc=$?
-check "終了コード0で osascript で続ける" '[ "$rc" -eq 0 ] && asked "通知は osascript で出します" && [ -f "$(SERVER_PLIST)" ]'
-check "Homebrew の手順を呼ばず、terminal-notifier を聞かない" '! called "brew-installer" && ! asked "terminal-notifier を入れますか"'
-
-echo "== Homebrew はあり terminal-notifier が無い: y"
-setup clt brew claude
-out="$(tty_install $'y\n' --no-schedule)"
-rc=$?
-check "Homebrew は聞かず、brew install terminal-notifier を呼ぶ" '[ "$rc" -eq 0 ] && ! asked "Homebrew を入れますか" && asked "terminal-notifier を入れますか" && called "^brew install terminal-notifier"'
-
-echo "== Homebrew はあり terminal-notifier が無い: N"
-setup clt brew claude
-out="$(tty_install $'n\n' --no-schedule)"
-rc=$?
-check "brew install を呼ばず osascript で続ける" '[ "$rc" -eq 0 ] && ! called "^brew install" && asked "通知は osascript で出します" && [ -f "$(SERVER_PLIST)" ]'
-
-echo "== --yes（Homebrew も terminal-notifier も無い、非端末）"
-setup clt claude
-out="$("$REPO/install.sh" --yes --no-schedule </dev/null 2>&1)"
-rc=$?
-check "聞かずに両方を入れる" '[ "$rc" -eq 0 ] && ! asked "\[y/N\]" && called "^brew-installer" && called "^brew install terminal-notifier"'
-
-echo "== 非端末（--yes なし、Homebrew も terminal-notifier も無い）"
-setup clt claude
-out="$("$REPO/install.sh" </dev/null 2>&1)"
-rc=$?
-check "何も入れず osascript で続ける" '[ "$rc" -eq 0 ] && ! called "brew-installer" && ! called "^brew" && asked "通知は osascript で出します"'
-
-echo "== --dry-run（Homebrew も terminal-notifier も無い）"
+echo "== --dry-run は入れるものが無ければ何も変えない"
 setup clt claude
 before="$(cd "$HOME" && find . | LC_ALL=C sort)"
 out="$("$REPO/install.sh" --dry-run --yes </dev/null 2>&1)"
 rc=$?
-check "入れるものを表示するだけで何も入れない" '[ "$rc" -eq 0 ] && asked "  - Homebrew" && asked "  - terminal-notifier" && ! called "brew-installer" && ! called "^brew" && ! called "^launchctl"'
+check "終了コード0で入れるものは無い" '[ "$rc" -eq 0 ] && asked "入れるものはありません" && ! called "^launchctl"'
 check "HOME を変えない" '[ "$(cd "$HOME" && find . | LC_ALL=C sort)" = "$before" ]'
 
 echo "== claude が無い"
-setup clt brew tn
+setup clt
 out="$(tty_install "" 2>&1)"
 rc=$?
 check "週1回の見直しを聞かずに登録しない" '[ "$rc" -eq 0 ] && ! asked "週1回の見直し（memory-audit" && asked "claude が見つからないため、週1回の見直しは登録しません" && [ ! -e "$HOME/Library/LaunchAgents/$JOB_PLIST_NAME" ]'
@@ -257,7 +187,7 @@ out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
 check "--with-schedule でも登録しない" '[ ! -e "$HOME/Library/LaunchAgents/$JOB_PLIST_NAME" ]'
 
 echo "== jq を使わずにフックを足し・外す"
-setup clt brew tn claude
+setup clt claude
 "$REPO/install.sh" --no-schedule </dev/null >/dev/null 2>&1
 check "フックを足し、既存の設定を残す" '[ "$(hook_count "$HOME/.claude/settings.json")" = "1" ] && [ "$("$JQ" -r .model "$HOME/.claude/settings.json")" = "opus" ]'
 "$REPO/install.sh" --uninstall </dev/null >/dev/null 2>&1

@@ -9,7 +9,9 @@ CR="$REPO/core/skills/change-review/scripts"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/destinations-test.XXXXXX")"
 WORK="$(cd -P "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
+export HOME="$WORK/home"
 export CLAUDE_REVIEW_PROPOSALS="$WORK/proposals"
+export CLAUDE_REVIEW_CHANGES_LOG="$WORK/log.md"
 NL=$'\n'
 
 pass=0
@@ -103,10 +105,10 @@ printf -- '- [G](g.md) — g\n- [A](a.md) — a\n' >"$MD/MEMORY.md"
 printf '| No | 消える記述 | 行き先 | 場所 |\n| --- | --- | --- | --- |\n| 1 | g1 | 記載あり | `%s:2` |\n' "$ROOT/CLAUDE.md" >"$WORK/cand2/table.md"
 id="$("$CR/propose.sh" --kind 削除 --target "$MD/g.md" --diff-file "$WORK/pdiff" --dest-dir "$WORK/cand2" --memory-index \
   --allow-root "$ROOT" --title "g の削除" --source "検査" --slug test --reason "重複")"
-p="$(ls "$CLAUDE_REVIEW_PROPOSALS/$id"-*.md)"
-check "案が作られる" '[ -f "$p" ] && grep -Fxq "status: pending" "$p"'
-check "索引の行の削除と表の行が入る" 'grep -Fxq "  - $MD/MEMORY.md" "$p" && grep -Fxq -- "-- [G](g.md) — g" "$p" && grep -Fq "| 2 | 索引 MEMORY.md の、このメモリを指す行 |" "$p"'
-check "確認の印は付かない" 'grep -Fxq "# g の削除" "$p"'
+p="$CLAUDE_REVIEW_CHANGES_LOG"
+check "案が作られる" '[ -f "$p" ] && grep -Fxq -- "- 状態: 未対応" "$p"'
+check "索引の行の削除と表の行が入る" 'grep -Fq "$MD/MEMORY.md" "$p" && grep -Fxq -- "-- [G](g.md) — g" "$p" && grep -Fq "| 2 | 索引 MEMORY.md の、このメモリを指す行 |" "$p"'
+check "確認の印は付かない" 'grep -Fxq -- "- 直したいこと: g の削除" "$p"'
 check "索引のファイルは変えない" '[ "$(cat "$MD/MEMORY.md")" = "- [G](g.md) — g${NL}- [A](a.md) — a" ]'
 "$CR/propose.sh" --kind 削除 --target "$MD/g.md" 2>/dev/null
 check "必須の引数が無ければ終了コード2" '[ $? -eq 2 ]'

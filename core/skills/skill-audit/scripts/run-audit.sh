@@ -3,12 +3,8 @@
 # 使い方: run-audit.sh [--force] [--dry-run]
 #   --force    変更が無くても起動する
 #   --dry-run  起動せず、組み立てたコマンドを標準出力へ表示する。last-hash は更新しない。
-# 起動の前に対象のスキル群を STATE_DIR/runs/<日時>/before へ複製し、終わった後に比べる。
-# 変更（追加・修正・ファイルの削除・スキルの削除）ごとに承認が要るかを判定し（approval_reason）、要らなければ残す。
-# 承認が要るものは実行前の版に戻したうえで、Skill change-review の承認待ちの案にする（案はシェルで作る）。
-# 承認が要るのは、claude が needs-approval.tsv に挙げたもの、訂正リストで同じ種類が2回訂正されたもの、
-# 安全のための規則のスキル（SKILL_AUDIT_PROTECTED）の修正・削除、安全のための規則の記述を消すもの、移し先への書き足しを伴うものである。
-# 承認なしで反映した変更には ID を振り、直す前の版を history/<日付>/ へ複製し、history.md と結果（~/claude-reports/skill-audit/）に載せる。
+# 対象を before と staging に複製し、claude は staging だけを編集する。
+# 追加・修正・削除・統合を共通の記録へ足し、元のスキルと履歴は変更しない。
 set -u
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
@@ -19,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # 利用者の環境だけの決まりを書く上書きファイル。SKILL.md より優先して読ませる。
 OVERRIDE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/claude-skills/$SELF_NAME.local.md"
 
-# 承認待ちの置き場所・否認リスト・判断の台帳（claude-review-inbox）。
+# 否認リスト・訂正リストと、旧版から残る状態。
 PROPOSALS_DIR="${CLAUDE_REVIEW_PROPOSALS:-${CLAUDE_REPORTS_ROOT:-$HOME/claude-reports}/proposals}"
 PROPOSALS_DIR="${PROPOSALS_DIR%/}"
 REJECTIONS="$PROPOSALS_DIR/rejections.md"
@@ -27,16 +23,12 @@ CORRECTIONS="$PROPOSALS_DIR/corrections.md"
 # 結果（未読の知らせに出るもの）の置き場所。公開版の点検（check-public.sh）と同じ場所に書く。
 RESULT_DIR="${CLAUDE_REPORTS_ROOT:-$HOME/claude-reports}"
 RESULT_DIR="${RESULT_DIR%/}/$SELF_NAME"
-# 修正・削除を常に承認待ちに回すスキル（安全のための規則）。空白区切り。
+# 修正・削除を常に要確認にするスキル（安全のための規則）。空白区切り。
 [ -n "${SKILL_AUDIT_PROTECTED:-}" ] || SKILL_AUDIT_PROTECTED="$(jobs_conf SKILL_AUDIT_PROTECTED)"
 read -r -a PROTECTED_NAMES <<<"${SKILL_AUDIT_PROTECTED:-security-rules commit-guard}"
-# 差分の - 行がこれに当たる変更は、安全のための規則をゆるめるおそれがあるため、承認待ちに回す。
-SAFETY_RE='permissions\.deny|gitleaks|秘密の検査'
 LEDGER_DIR="${CLAUDE_REVIEW_STATE:-$HOME/.local/state/claude-review-inbox}"
 LEDGER_DIR="${LEDGER_DIR%/}"
-# snapshot.sh と trash-skill.sh は、スキル置き場を経由した絶対パスで呼ばせる（許可の規則と一致させるため）。
-SCRIPTS_CALL="$ROOT/$SELF_NAME/scripts"
-PROMPT="Skill skill-audit を自動モードで実行する。対象範囲と手順は SKILL.md に従う。否認リストは ${REJECTIONS} にある。始める前に読み、否認リストと同じ対象・同じ趣旨の修正・削除は行わない。訂正リストは ${CORRECTIONS} にある。否認リストと同じく始める前に読み、訂正された変更を再び行わない。複製は ${SCRIPTS_CALL}/snapshot.sh、スキルの削除は ${SCRIPTS_CALL}/trash-skill.sh を、この絶対パスのとおりに呼ぶ（相対パスや別の表記で呼ばない）。変更の記録は ${HISTORY_FILE} に書く。直す前の複製は snapshot.sh が ${HISTORY_DIR}/<日付>/ に置く。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。"
+CHANGES_LOG="${CLAUDE_REVIEW_CHANGES_LOG:-$HOME/.local/state/claude-reports/changes/log.md}"
 LOG_KEEP=30
 RUN_KEEP=10
 
@@ -119,11 +111,6 @@ if ! type guard_deny_rules >/dev/null 2>&1; then
   log_error "Skill change-review の link-scopes.sh を読み込めません。書き換えを拒否する規則を作れないため、精査を起動しません"
   exit 1
 fi
-APPROVAL_MODE="$(approval_mode)"
-LEDGER_SH=""
-for lsc in "${CHANGE_REVIEW_SCRIPTS:-}" "$SCRIPT_DIR/../../change-review/scripts" "$ROOT/change-review/scripts"; do
-  [ -n "$lsc" ] && [ -f "$lsc/ledger.sh" ] && { LEDGER_SH="$lsc/ledger.sh"; break; }
-done
 link_reals=()
 while IFS= read -r lr; do [ -n "$lr" ] && link_reals+=("$lr"); done < <(skill_link_reals "$ROOT" ${SKILL_DIRS[@]+"${SKILL_DIRS[@]}"})
 
@@ -132,7 +119,7 @@ find_change_review() {
   local c
   for c in "${CHANGE_REVIEW_SCRIPTS:-}" "$(dirname "$0")/../../change-review/scripts" \
     "$ROOT/change-review/scripts" ${SKILL_DIRS[@]+"${SKILL_DIRS[@]/%//change-review/scripts}"}; do
-    if [ -n "$c" ] && [ -x "$c/new-proposal.sh" ] && [ -x "$c/diff-label.sh" ] && [ -x "$c/propose.sh" ]; then
+    if [ -n "$c" ] && [ -x "$c/new-change.sh" ] && [ -x "$c/diff-label.sh" ] && [ -x "$c/propose.sh" ]; then
       printf '%s\n' "$c"
       return 0
     fi
@@ -163,47 +150,25 @@ RUN_DIR="$STATE_DIR/runs/$ts"
 # 同じ秒の2回目以降は -2、-3 と連番にし、前の実行の複製と行き先の表を使い回さない。
 n=2
 while [ -e "$RUN_DIR" ]; do RUN_DIR="$STATE_DIR/runs/$ts-$n"; n=$((n + 1)); done
-# 修正・削除の候補ごとの「消える記述の行き先」を claude に書かせる場所（Skill change-review の destinations.sh が読む）。
+STAGE="$RUN_DIR/staging"
+BEFORE="$RUN_DIR/before"
 DEST_BASE="$RUN_DIR/destinations"
-# 承認が要ると claude が判断した変更の一覧（対象の絶対パス<TAB>理由）。
 NEEDS="$RUN_DIR/needs-approval.tsv"
-PROMPT="${PROMPT}承認が要らないと判断した修正・削除・統合は、そのまま残る。承認が要ると判断したもの（SKILL.md「1.1」の承認待ちに回すもの、判断に迷うもの）は、${NEEDS} に「対象の絶対パス<TAB>理由」の形で1行1件書く（ファイルならファイルの、スキルの削除ならスキルのディレクトリの絶対パス。シェルが実行前の版へ戻して承認待ちにする）。"
 CR_SCRIPTS="$(find_change_review)" || CR_SCRIPTS=""
+PROMPT="Skill skill-audit を自動モードで実行する。対象のスキルは ${ROOT}、直す前の複製は ${BEFORE}、直した版の書き込み先は ${STAGE}。対象と同じ相対パスで作業用の複製だけを直す。元のスキルと変更の記録と history.md は直接直さない。追加・修正・削除・統合はすべてシェルが直したいことの記録に足す。削除の候補は ${RUN_DIR}/deletions.tsv に「対象の元の絶対パス<TAB>理由」の形で書く（スキル全体を消すならスキルのディレクトリ）。作業用の複製の削除も候補として扱う。スキルを削除する場合、その参照を消す修正も作業用の複製に作る。snapshot.sh と trash-skill.sh は呼ばない。利用者の確認が要るものと判断に迷うものは ${NEEDS} に「対象の元の絶対パス<TAB>理由」の形で書く。否認リストは ${REJECTIONS}、訂正リストは ${CORRECTIONS} にある。始める前に読み、否認や訂正と同じ対象・同じ趣旨の変更を作らない。利用者の環境だけの決まりは ${OVERRIDE_FILE} にある（無ければ飛ばす）。移し先への追加は、移し先を直接直さず行き先のフォルダに置く。"
 if [ -n "$CR_SCRIPTS" ]; then
-  PROMPT="${PROMPT}承認待ちにする修正・削除は、実行後に実行前の版へ戻して承認待ちの案にする。スキルの削除では、スキルのディレクトリの絶対パスを候補とする。スキルを削除する場合、そのスキルを参照する他の箇所の修正も同じ実行の中で行う（シェルが削除の案にまとめる）。移し先へ書き足す内容は、移し先のファイルを直接直さず、次の規則のとおり行き先のフォルダに置く。
-$("$CR_SCRIPTS/destinations.sh" --print-rule "$DEST_BASE")"
+  PROMPT="${PROMPT}$("$CR_SCRIPTS/destinations.sh" --print-rule "$DEST_BASE")"
 fi
 
 # 許可する規則。読んでよい範囲を設定ディレクトリ（スキル・メモリ）・結果の置き場所と ROOT に限る。
 # 範囲を付けない Read・Glob・Grep と、任意のパスを読める Bash（ls・grep・diff 等）は許可しない。
 # ホームの下の同期フォルダ等を検索すると、macOS がアクセス許可のダイアログを出すためである。
-read_scopes=(${CONFIG_DIRS[@]+"${CONFIG_DIRS[@]}"} "$HOME/.agents" "$HOME/claude-reports" "$HOME/.local/state/claude-reports"
-  "$ROOT" "$PROPOSALS_DIR" "$DEST_BASE" "$HISTORY_DIR")
-# 変更の記録はスキル置き場の外（STATE_DIR）にあるため、そのファイルだけ読み書きを許可する。
-allowed=(Skill "Bash(date:*)" "Edit(/$ROOT/**)" "Edit(/$DEST_BASE/**)" "Edit(/$NEEDS)" "Read(/$HISTORY_FILE)" "Edit(/$HISTORY_FILE)" "Read(/$OVERRIDE_FILE)")
-# snapshot.sh と trash-skill.sh は、実体のパス・スキル置き場を経由したパス・作業のフォルダ（ROOT）からの相対パスの各形を許可する。
-# Bash の許可は文字列の前方一致で判定されるため、リンクの側のパスで呼ぶと実体のパスの規則に一致せず、許可待ちで止まる。
-seen_bash=" "
-for sc in snapshot.sh trash-skill.sh; do
-  for sp in "$SCRIPT_DIR/$sc" "$ROOT/$SELF_NAME/scripts/$sc" \
-    ${SKILL_DIRS[@]+"${SKILL_DIRS[@]/%//$SELF_NAME/scripts/$sc}"} "$SELF_NAME/scripts/$sc" "./$SELF_NAME/scripts/$sc"; do
-    case "$seen_bash" in *" $sp "*) continue ;; esac
-    seen_bash="$seen_bash$sp "
-    allowed+=("Bash($sp:*)")
-  done
-done
+read_scopes=(${CONFIG_DIRS[@]+"${CONFIG_DIRS[@]}"} "$HOME/.agents" "${CLAUDE_REPORTS_ROOT:-$HOME/claude-reports}"
+  "$HOME/.local/state/claude-reports" "$ROOT" "$PROPOSALS_DIR" "$RUN_DIR" "$HISTORY_DIR")
+allowed=(Skill "Bash(date:*)" "Edit(/$STAGE/**)" "Edit(/$DEST_BASE/**)" "Edit(/$NEEDS)"
+  "Edit(/$RUN_DIR/deletions.tsv)" "Read(/$HISTORY_FILE)" "Read(/$OVERRIDE_FILE)")
 for d in "${read_scopes[@]}"; do allowed+=("Read(/$d/**)"); done
 for lr in ${link_reals[@]+"${link_reals[@]}"}; do allowed+=("Read(/$lr/**)"); done
-# 自作のスキルのリンク（is_own_link）は、実体のパスでも書き換えを許可する。
-own_reals=" "
-while IFS= read -r n; do
-  is_target "$n" || continue
-  real="$(resolve_link "$ROOT/$n")"
-  [ -n "$real" ] || continue
-  case "$own_reals" in *" $real "*) continue ;; esac
-  own_reals="$own_reals$real "
-  allowed+=("Edit(/$real/**)")
-done < <(list_symlinks)
 
 # 拒否する規則。設定ディレクトリの skills が ROOT への別名（リンク）なら、そちらの表記も拒否する。
 roots=("$ROOT")
@@ -239,6 +204,12 @@ while IFS= read -r n; do
   real="$(resolve_link "$ROOT/$n")"
   [ -n "$real" ] && [ -e "$real" ] && add_deny "Edit(/$real/**)"
 done < <(list_symlinks)
+for r in "${roots[@]}"; do add_deny "Edit(/$r/**)"; done
+for lr in ${link_reals[@]+"${link_reals[@]}"}; do add_deny "Edit(/$lr/**)"; done
+add_deny "Edit(/$BEFORE/**)"
+add_deny "Edit(/$HISTORY_FILE)"
+add_deny "Edit(/$HISTORY_DIR/**)"
+add_deny "Edit(/$CHANGES_LOG)"
 add_deny "Edit(/$HOME/.agents/**)"
 add_deny "Edit(/$HOME/Documents/**)"
 deny_files=()
@@ -246,8 +217,8 @@ for c in ${CONFIG_DIRS[@]+"${CONFIG_DIRS[@]}"}; do deny_files+=("$c/CLAUDE.md" "
 for df in ${deny_files[@]+"${deny_files[@]}"}; do add_deny "Edit(/$df)"; done
 add_deny "Edit(/$PROPOSALS_DIR/**)"
 add_deny "Edit(/$LEDGER_DIR/**)"
-# CLAUDE.md・settings.json・承認待ちの置き場所・台帳がリンクなら（別の設定ディレクトリの CLAUDE.md へのリンク等）、実体のパスでも拒否する。
-for df in ${deny_files[@]+"${deny_files[@]}"} "$PROPOSALS_DIR" "$LEDGER_DIR"; do
+# CLAUDE.md・settings.json・否認リストの置き場所・台帳・共通の記録がリンクなら（別の設定ディレクトリの CLAUDE.md へのリンク等）、実体のパスでも拒否する。
+for df in ${deny_files[@]+"${deny_files[@]}"} "$PROPOSALS_DIR" "$LEDGER_DIR" "$CHANGES_LOG"; do
   while IFS= read -r dp; do
     if [ -d "$dp" ]; then add_deny "Edit(/$dp/**)"; else add_deny "Edit(/$dp)"; fi
   done < <(path_and_real "$df" | tail -n +2)
@@ -273,7 +244,7 @@ cmd=("${launcher[@]}" -p "$PROMPT" --model opus --effort low --permission-mode d
 # コマンドを単一引用符で囲んだ形で表示する。printf %q は bash 3.2 でマルチバイト文字を壊すため使わない。
 print_command() {
   local a sq="'\\''"
-  printf "cd '%s' &&" "${ROOT//\'/$sq}"
+  printf "cd '%s' &&" "${STAGE//\'/$sq}"
   for a in "${cmd[@]}"; do
     printf " '%s'" "${a//\'/$sq}"
   done
@@ -285,372 +256,208 @@ if [ "$dry_run" -eq 1 ]; then
   exit 0
 fi
 
-# ---- 実行前の複製と、実行後の比較 ----
+# ---- 作業用の複製の比較と記録 ----
+RECORDED="$RUN_DIR/recorded.txt"
+NOTES="$RUN_DIR/notes.txt"
 
-# 既存の行を変えない・消さない変更（diff の - 行が無い）なら 0 を返す。
-only_additions() {
-  ! diff -u "$1" "$2" | tail -n +3 | grep -q '^-'
-}
-
-# 見出しを対象の絶対パスにした差分を出す。change-review が無ければ diff -u のまま出す（承認待ちは作られない）。
-label_diff() {
-  if [ -n "$CR_SCRIPTS" ]; then
-    "$CR_SCRIPTS/diff-label.sh" "$@"
-  else
-    diff -u -- "$1" "$2"
-  fi
-}
-
-# 承認待ちの案を1件作り、番号を PROPOSED に記録する。
-# 行き先の表は claude が書いた DEST_BASE<対象の位置>/ から読み、移し先への追加の差分も同じ案に入れる（Skill change-review の propose.sh）。
-# 引数: <修正|削除> <対象の絶対パス> <差分のファイル> <短い名前> <理由> [<反映後の確かめ方>] [<差分に含めた他の対象の一覧のファイル>]
-make_proposal() {
-  local kind="$1" target="$2" dfile="$3" slug="$4" reason="$5" check="${6:-}" more="${7:-}" id x
-  local extra=() c
-  for c in ${CONFIG_DIRS[@]+"${CONFIG_DIRS[@]}"}; do extra+=(--allow-root "$c"); done
-  extra+=(--allow-root "$ROOT")
-  if [ -z "$CR_SCRIPTS" ]; then
-    printf -- '- `%s`（%s）: Skill change-review が見つからず承認待ちを作れなかった。実行前の版に戻した\n' "$target" "$kind" >>"$NOTES"
-    return 1
-  fi
-  if [ -n "$more" ] && [ -f "$more" ]; then
-    while IFS= read -r x; do [ -n "$x" ] && extra+=(--extra-target "$x"); done <"$more"
-  fi
-  id="$("$CR_SCRIPTS/propose.sh" --kind "$kind" --target "$target" --diff-file "$dfile" \
-    --dest-dir "$DEST_BASE$(stage_rel "$target")" "${extra[@]}" --source "skill-audit（自動の精査 ${ts}）" \
-    --title "${target#$ROOT/} の${kind}（skill-audit の自動の精査）" \
-    --slug "$slug" --reason "$reason" --check "${check:-対象のファイルが差分のとおりになっていること、参照しているスキル名と節の名前が実在すること、移し先へ書き足されていることを確かめる。}")"
-  if [ -z "$id" ]; then
-    printf -- '- `%s`（%s）: 承認待ちの作成に失敗した。実行前の版に戻した\n' "$target" "$kind" >>"$NOTES"
-    return 1
-  fi
-  printf -- '- %s: `%s`（%s）\n' "${id%%$'\n'*}" "$target" "$kind" >>"$PROPOSED"
-}
-
-# 差分の - 行が、承認待ちに回したスキルの削除の対象の名前を含めば、そのスキルの名前を出す。
-mentioned_deleted_skill() {
-  local s
-  [ -s "$RUN_DIR/delete-approval.txt" ] || return 1
-  while IFS= read -r s; do
-    [ -n "$s" ] || continue
-    if tail -n +3 "$1" | grep '^-' | grep -Eq "(^|[^A-Za-z0-9_-])${s}([^A-Za-z0-9_-]|\$)"; then
-      printf '%s\n' "$s"
-      return 0
-    fi
-  done <"$RUN_DIR/delete-approval.txt"
-  return 1
-}
-
-# 承認が要るかを判定する。要れば理由を標準出力へ書いて 0 を返し、要らなければ 1 を返す。
-# 引数: <対象の絶対パス> <追加|修正|削除> <スキル名> <差分のファイル>
-approval_reason() {
-  local target="$1" kind="$2" skill="$3" dfile="$4" ddir n r p
-  ddir="$DEST_BASE$(stage_rel "$target")"
-  if [ -z "$CR_SCRIPTS" ]; then
-    # 訂正リストを読めず、承認待ちも作れない。追加だけは従来どおり残す。
-    [ "$kind" = 追加 ] && return 1
-    printf 'Skill change-review が見つからない'
-    return 0
-  fi
+# needs-approval は元の絶対パスを使う。スキル全体の指定は配下の変更にも適用する。
+kind_reason() {
+  local target="$1" kind="$2" skill="$3" r n p
+  case "$target" in
+    */CLAUDE.md|*/rejections.md|*/corrections.md) printf '共通方針または否認・訂正リストの変更'; return ;;
+  esac
   if [ -f "$NEEDS" ]; then
-    # 対象そのもの、または対象を含むスキルのディレクトリが挙がっていれば、承認待ちにする。
     r="$(awk -F'\t' -v t="$target" '$1 != "" && ($1 == t || index(t, $1 "/") == 1) { print ($2 == "" ? "理由の記載なし" : $2); exit }' "$NEEDS")"
-    if [ -n "$r" ]; then
-      printf '精査が承認が要ると判断した（%s）' "$r"
-      return 0
-    fi
+    [ -z "$r" ] || { printf '精査が確認を要すると判断した（%s）' "$r"; return; }
   fi
-  n="$(bash "$CR_SCRIPTS/corrections.sh" count "$SELF_NAME/${kind}/${skill}" 2>/dev/null)"
+  n="$(bash "$CR_SCRIPTS/corrections.sh" count "$SELF_NAME/$kind/$skill" 2>/dev/null)"
   if [ "${n:-0}" -ge 2 ]; then
-    printf '同じ種類の変更（%s/%s/%s）が訂正リストで %s 回訂正されている' "$SELF_NAME" "$kind" "$skill" "$n"
-    return 0
+    printf '同じ種類の変更（%s/%s/%s）が訂正リストで %s 回訂正されている' "$SELF_NAME" "$kind" "$skill" "$n"; return
   fi
   if [ "$kind" != 追加 ]; then
     for p in ${PROTECTED_NAMES[@]+"${PROTECTED_NAMES[@]}"}; do
-      if [ "$skill" = "$p" ]; then
-        printf '安全のための規則のスキル（%s）の%sである' "$skill" "$kind"
-        return 0
-      fi
+      if [ "$skill" = "$p" ]; then printf '安全のための規則のスキル（%s）の%sである' "$skill" "$kind"; return; fi
     done
   fi
-  if [ -s "$dfile" ] && tail -n +3 "$dfile" | grep '^-' | grep -Eq "$SAFETY_RE"; then
-    printf '安全のための規則（permissions.deny・gitleaks・秘密の検査など）の記述を消す・変える'
-    return 0
+}
+
+record_change() {
+  local kind="$1" target="$2" dfile="$3" skill="$4" more="${5:-}" kr title id x k
+  local extra=() c
+  kr="$(kind_reason "$target" "$kind" "$skill")"
+  title="${target#$ROOT/} の${kind}（skill-audit の精査）"
+  for c in ${CONFIG_DIRS[@]+"${CONFIG_DIRS[@]}"}; do extra+=(--allow-root "$c"); done
+  extra+=(--allow-root "$ROOT")
+  if [ -n "$more" ] && [ -f "$more" ]; then
+    while IFS= read -r x; do [ -n "$x" ] && extra+=(--extra-target "$x"); done <"$more"
   fi
-  if [ -f "$ddir/moves.tsv" ] || grep -Fq '（候補なし）' "$ddir/table.md" 2>/dev/null; then
-    printf '消える記述を移し先へ書き足す必要がある'
-    return 0
+  if [ "$kind" = 追加 ]; then
+    k=直してよい
+    [ -z "$kr" ] || k=要確認
+    id="$("$CR_SCRIPTS/new-change.sh" --id-prefix "$SELF_NAME" --kind "$k" --kind-reason "$kr" \
+      --source "skill-audit（${RESULT_REPORT}）" --title "$title" --target "$target" \
+      --diff-file "$dfile" --reason "skill-audit の精査（${ts}）。根拠は結果 ${RESULT_REPORT} を参照する。")" || return 1
+  else
+    id="$("$CR_SCRIPTS/propose.sh" --id-prefix "$SELF_NAME" --kind "$kind" \
+      --category "$SELF_NAME/$kind/$skill" --kind-reason "$kr" --target "$target" \
+      --diff-file "$dfile" --dest-dir "$DEST_BASE$(stage_rel "$target")" "${extra[@]}" \
+      --source "skill-audit（${RESULT_REPORT}）" --title "$title" \
+      --reason "skill-audit の精査（${ts}）。根拠は結果 ${RESULT_REPORT} を参照する。")" || return 1
   fi
-  if [ "$APPROVAL_MODE" = screen ] && [ "$kind" != 追加 ]; then
-    printf '承認ありの設定（CLAUDE_REVIEW_APPROVAL_MODE=screen）では、修正と削除をすべて承認待ちにする'
-    return 0
-  fi
+  id="${id%%$'\n'*}"
+  k="$(awk -v id="$id" '/^## / { found = ($NF == id) } found && /^- 区分: / { sub(/^- 区分: /, ""); print; exit }' "$CHANGES_LOG")"
+  printf -- '- %s・%s・`%s`・%s\n' "$id" "$k" "$target" "$title" >>"$RECORDED"
+}
+
+# 削除されたスキルへの参照の修正を、同じ削除の差分にまとめる。
+mentioned_deleted_skill() {
+  local s
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if tail -n +3 "$1" | grep '^-' | grep -Eq "(^|[^A-Za-z0-9_-])${s}([^A-Za-z0-9_-]|\$)"; then printf '%s\n' "$s"; return 0; fi
+  done <"$RUN_DIR/deleted-skills.txt"
   return 1
 }
 
-# 直す前の版を history/<日付>/ へ複製し、そのパスを出す（snapshot.sh と同じ名前の付け方。既にあれば最初の版を残す）。
-# 引数: <実行前の版> <スキル内の相対パスを含む、ROOT からの相対パス>
-keep_before() {
-  local src="$1" rel="$2" skill rest dest
-  skill="${rel%%/*}"
-  rest="${rel#*/}"
-  dest="$HISTORY_DIR/$(date '+%Y-%m-%d')/${skill}__${rest//\//_}.bak"
-  mkdir -p "${dest%/*}" || return 1
-  [ -e "$dest" ] || cp -p "$src" "$dest" || return 1
-  printf '%s\n' "$dest"
-}
-
-# 承認なしで反映した変更を1件記録する。変更の台帳（Skill change-review の ledger.sh）にも直す前と直した後の版を写す。
-# 引数: <追加|修正|削除> <対象の絶対パス> <スキル名> <戻し方> <直す前の版|-> [<直した後の版|->（省略時は対象の今の状態）]
-record_auto() {
-  local n id after="${6:-$2}"
-  n="$(cat "$RUN_DIR/auto-n" 2>/dev/null || echo 0)"
-  n=$((n + 1))
-  printf '%s\n' "$n" >"$RUN_DIR/auto-n"
-  id="$(printf '%s-%s-%02d' "$SELF_NAME" "${RUN_DIR##*/}" "$n")"
-  printf -- '- %s: `%s`（%s。種類 `%s/%s/%s`。%s）\n' "$id" "$2" "$1" "$SELF_NAME" "$1" "$3" "$4" >>"$ADDED"
-  if [ -z "$LEDGER_SH" ]; then
-    printf -- '- %s: 変更の台帳（ledger.sh）が見つからず、台帳に記録できなかった\n' "$id" >>"$NOTES"
-  elif ! bash "$LEDGER_SH" record --id "$id" --kind "$SELF_NAME/$1/$3" --target "$2" --before "${5:--}" --after "$after" >/dev/null; then
-    printf -- '- %s: 変更の台帳への記録に失敗した\n' "$id" >>"$NOTES"
-  fi
-}
-
-# スキルが消えたかを判定する。
-skill_gone() {
-  [ ! -d "$ROOT/$1" ] || { [ -L "$ROOT/$1" ] && ! is_own_link "$1"; }
-}
-
-# 実行の前後を比べ、追加は残し、修正・削除は戻して承認待ちにする。
-# スキルの削除と、そのスキルを参照する他の箇所の修正（差分の - 行がスキルの名前を含むもの）は、1件の案にまとめる。
-# 行き先の表の移し先（moves.tsv）に挙がったファイルを claude が直接書き換えていたら、実行前の版に戻す（移し先への追加は案で行う）。
 review_changes() {
-  local t f rel cur one trashed e dels s r kind
-  one="$RUN_DIR/one.diff"
+  local t f rel target before after kind s one="$RUN_DIR/one.diff"
   : >"$RUN_DIR/deleted-skills.txt"
   : >"$RUN_DIR/move-dests.txt"
-  if [ -d "$DEST_BASE" ]; then
-    find "$DEST_BASE" -name moves.tsv -type f -print | while IFS= read -r f; do
-      cut -f1 "$f"
-    done | awk 'NF' >"$RUN_DIR/move-dests.txt"
-  fi
-  : >"$RUN_DIR/delete-approval.txt"
+  find "$DEST_BASE" -name moves.tsv -type f -print | while IFS= read -r f; do
+    cut -f1 "$f"
+  done | awk 'NF' >"$RUN_DIR/move-dests.txt"
   while IFS= read -r t; do
-    [ -n "$t" ] && skill_gone "$t" || continue
-    printf '%s\n' "$t" >>"$RUN_DIR/deleted-skills.txt"
-    # スキルが消えた（trash-skill.sh で移された）。承認が要るかを判定し、要るものだけ元に戻す。
-    trashed=""
-    for e in "$ROOT/.skill-audit-trash/"*-"$t"; do
-      [ -d "$e" ] || continue
-      grep -Fxq -- "$e" "$RUN_DIR/trash-before.txt" && continue
-      trashed="$e"
-    done
-    dels="$RUN_DIR/delete-$t.self.diff"
-    : >"$dels"
-    (cd "$BEFORE/$t" && find . \( -type f -o -type l \) -print | LC_ALL=C sort) | while IFS= read -r rel; do
-      rel="${rel#./}"
-      label_diff "$BEFORE/$t/$rel" /dev/null "$ROOT/$t/$rel" >>"$dels"
-    done
-    if r="$(approval_reason "$ROOT/$t" 削除 "$t" "$dels")"; then
-      printf '%s\n' "$t" >>"$RUN_DIR/delete-approval.txt"
-      printf '%s\n' "$r" >"$RUN_DIR/delete-$t.reason"
-      : >"$RUN_DIR/delete-$t.refs.diff"
-      : >"$RUN_DIR/delete-$t.targets"
-      if [ ! -e "$ROOT/$t" ] && [ ! -L "$ROOT/$t" ]; then
-        if [ -n "$trashed" ]; then mv "$trashed" "$ROOT/$t"; else cp -Rp "$BEFORE/$t" "$ROOT/$t"; fi
-        log_info "削除されたスキルを戻しました: $t"
-      fi
-    else
-      # 承認なしで残す。直す前の版は、退避先（.skill-audit-trash）に加えて history/<日付>/ にも複製する。
-      e="$HISTORY_DIR/$(date '+%Y-%m-%d')/${t}__skill"
-      [ -e "$e" ] || { mkdir -p "${e%/*}" && cp -Rp "$BEFORE/$t" "$e"; }
-      if [ -n "$trashed" ]; then
-        record_auto 削除 "$ROOT/$t" "$t" "退避先 \`$trashed\`、直す前の版 \`$e\`" "$BEFORE/$t" -
-      else
-        record_auto 削除 "$ROOT/$t" "$t" "直す前の版 \`$e\`" "$BEFORE/$t" -
-      fi
+    if [ ! -d "$STAGE/$t" ]; then
+      printf '%s\n' "$t" >>"$RUN_DIR/deleted-skills.txt"
+      : >"$RUN_DIR/delete-$t.diff"; : >"$RUN_DIR/delete-$t.targets"
+      while IFS= read -r f; do
+        [ ! -L "$f" ] || continue
+        "$CR_SCRIPTS/diff-label.sh" "$f" /dev/null "$ROOT/${f#$BEFORE/}" >>"$RUN_DIR/delete-$t.diff"
+      done < <(find "$BEFORE/$t" -type f -print | LC_ALL=C sort)
     fi
   done <"$RUN_DIR/targets.txt"
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    # 消えたスキルは上で扱った。承認待ちの案は、参照している箇所の修正を集めた後（このループの後）に作る。
-    grep -Fxq -- "$t" "$RUN_DIR/deleted-skills.txt" && continue
-    (cd "$BEFORE/$t" && find . \( -type f -o -type l \) -print | LC_ALL=C sort) | while IFS= read -r rel; do
-      rel="$t/${rel#./}"
-      f="$BEFORE/$rel"
-      cur="$ROOT/$rel"
-      if [ -L "$f" ] || [ -L "$cur" ]; then
-        if [ "$(readlink "$f" 2>/dev/null)" != "$(readlink "$cur" 2>/dev/null)" ]; then
-          rm -f "$cur" && mkdir -p "$(dirname "$cur")" && cp -Pp "$f" "$cur"
-          printf -- '- `%s`: シンボリックリンクが変わったため、実行前の状態に戻した（承認待ちは作っていない）\n' "$cur" >>"$NOTES"
-        fi
-      elif [ ! -e "$cur" ]; then
-        label_diff "$f" /dev/null "$cur" >"$one"
-        if r="$(approval_reason "$cur" 削除 "$t" "$one")"; then
-          mkdir -p "$(dirname "$cur")" && cp -p "$f" "$cur"
-          make_proposal 削除 "$cur" "$one" "skill-audit-delete" \
-            "skill-audit の自動の精査（${ts}）がファイルを削除した。承認待ちに回した理由: ${r}。実行前の版に戻した。"
-        else
-          record_auto 削除 "$cur" "$t" "直す前の版 \`$(keep_before "$f" "$rel")\`" "$f" -
-        fi
-      elif cmp -s "$f" "$cur"; then
-        :
-      elif grep -Fxq -- "$cur" "$RUN_DIR/move-dests.txt"; then
-        cp -p "$f" "$cur"
-        printf -- '- `%s`: 行き先の表の移し先を直接書き換えていたため、実行前の版に戻した（移し先への追加は案の差分で行う）\n' "$cur" >>"$NOTES"
-      else
-        kind=修正
-        only_additions "$f" "$cur" && kind=追加
-        label_diff "$f" "$cur" "$cur" >"$one"
-        if [ "$kind" = 修正 ] && s="$(mentioned_deleted_skill "$one")"; then
-          # 承認待ちに回したスキルの削除の対象を参照する箇所の修正は、スキルの削除の案に入れる。
-          cp -p "$f" "$cur"
-          cat "$one" >>"$RUN_DIR/delete-$s.refs.diff"
-          printf '%s\n' "$cur" >>"$RUN_DIR/delete-$s.targets"
-          continue
-        fi
-        if r="$(approval_reason "$cur" "$kind" "$t" "$one")"; then
-          cp -p "$f" "$cur"
-          make_proposal 修正 "$cur" "$one" "skill-audit-edit" \
-            "skill-audit の自動の精査（${ts}）が${kind}を行った。承認待ちに回した理由: ${r}。実行前の版に戻した。根拠は ${HISTORY_FILE} の同じ日時の記録を参照する。"
-        else
-          record_auto "$kind" "$cur" "$t" "直す前の版 \`$(keep_before "$f" "$rel")\`" "$f"
-        fi
-      fi
-    done
-    # 新しいファイルは追加として残す。
-    (cd "$ROOT/$t" && find . \( -type f -o -type l \) -print | LC_ALL=C sort) | while IFS= read -r rel; do
-      rel="$t/${rel#./}"
-      [ -e "$BEFORE/$rel" ] || [ -L "$BEFORE/$rel" ] || record_auto 追加 "$ROOT/$rel" "$t" "新しいファイル。消せば戻る" -
-    done
-  done <"$RUN_DIR/targets.txt"
-  # 承認待ちに回したスキルの削除の案を作る。参照している箇所の修正も同じ案に入れる。
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    cat "$RUN_DIR/delete-$t.self.diff" "$RUN_DIR/delete-$t.refs.diff" >"$RUN_DIR/delete-$t.diff"
-    make_proposal 削除 "$ROOT/$t" "$RUN_DIR/delete-$t.diff" "skill-audit-delete-$t" \
-      "skill-audit の自動の精査（${ts}）がスキル ${t} を削除した。承認待ちに回した理由: $(cat "$RUN_DIR/delete-$t.reason")。実行前の状態に戻した。差分はスキルの全ファイルの削除であり、承認されるとそのまま反映し、空になったフォルダも消す（直す前の版は反映する側が残す）。${t} を参照している他の箇所の修正も、この案の差分に含めた。" \
-      "スキル置き場から ${t} が消えていること、${t} を参照しているスキルと CLAUDE.md が残っていないことを確かめる。" \
-      "$RUN_DIR/delete-$t.targets"
-  done <"$RUN_DIR/delete-approval.txt"
-  # 新しいスキルは追加として残す。
-  while IFS= read -r t; do
-    grep -Fxq -- "$t" "$RUN_DIR/targets.txt" || record_auto 追加 "$ROOT/$t" "$t" "新しいスキル。trash-skill.sh で退避すれば戻る" -
-  done < <(list_targets)
-}
-
-# history.md の先頭（冒頭の説明の後の --- の次）へ、承認なしで反映した変更と承認待ちの番号を足す。
-# 同じ内容を結果（~/claude-reports/skill-audit/）にも書き、未読の知らせに出す。
-record_history() {
-  local hist="$HISTORY_FILE" n_added n_prop ids tmp
-  n_added="$(grep -c '^- ' "$ADDED" | tr -d ' ')"
-  n_prop="$(grep -c . "$PROPOSED" | tr -d ' ')"
-  [ "$n_added" -gt 0 ] || [ "$n_prop" -gt 0 ] || [ -s "$NOTES" ] || return 0
-  ids="$(sed -n 's/^- \([0-9-]*\): .*/\1/p' "$PROPOSED" | tr '\n' ' ' | sed 's/ $//; s/ /、/g')"
-  tmp="$RUN_DIR/history.md.tmp"
-  write_result "$n_added" "$n_prop" "$ids"
   {
-    printf '## %s 自動（run-audit.sh の記録）\n\n' "$(date '+%Y-%m-%d %H:%M')"
-    printf -- '- 承認なしで反映した変更: %s件\n' "$n_added"
-    sed 's/^/  /' "$ADDED"
-    printf -- '- 承認待ちにした変更: %s件（%s）。実行前の版に戻した（Skill change-review、置き場所 %s）\n' "$n_prop" "${ids:-なし}" "$PROPOSALS_DIR"
-    sed 's/^/  /' "$PROPOSED"
-    if [ -s "$NOTES" ]; then
-      printf -- '- 注意\n'
-      sed 's/^/  /' "$NOTES"
+    (cd "$BEFORE" && find . \( -type f -o -type l \) -print)
+    (cd "$STAGE" && find . \( -type f -o -type l \) -print)
+  } | LC_ALL=C sort -u >"$RUN_DIR/files.txt"
+  while IFS= read -r rel; do
+    rel="${rel#./}"; t="${rel%%/*}"
+    case "$rel" in *..*|.*) printf -- '- `%s`: 対象外の相対パスである\n' "$rel" >>"$NOTES"; continue ;; esac
+    is_excluded_name "$t" && continue
+    if ! grep -Fxq -- "$t" "$RUN_DIR/targets.txt"; then
+      if [ -e "$ROOT/$t" ] || [ -L "$ROOT/$t" ]; then
+        printf -- '- `%s`: 元のスキル置き場の対象外の項目と同名のため、記録していない\n' "$ROOT/$rel" >>"$NOTES"
+        continue
+      fi
+      if [ ! -d "$STAGE/$t" ] || [ -L "$STAGE/$t" ] || [ ! -f "$STAGE/$t/SKILL.md" ]; then
+        printf -- '- `%s`: 新規スキルの非リンクディレクトリと SKILL.md がそろっていないため、記録していない\n' "$ROOT/$rel" >>"$NOTES"
+        continue
+      fi
     fi
-    printf '\n'
-  } >"$RUN_DIR/record.md"
-  # 初めて書くときは、冒頭の説明と区切りを作ってから記録を足す。
-  if [ ! -s "$hist" ]; then
-    printf '# スキルの変更履歴\n\nSkill skill-audit が行った変更の記録。新しいものを上に書く。\n\n---\n\n' >"$hist"
-  fi
-  if [ -f "$hist" ] && grep -qx -- '---' "$hist"; then
-    awk -v rec="$RUN_DIR/record.md" '
-      !done && $0 == "---" { print; print ""; while ((getline l < rec) > 0) print l; done = 1; skip = 1; next }
-      skip && $0 == "" { skip = 0; next }
-      { skip = 0; print }' "$hist" >"$tmp" && cat "$tmp" >"$hist"
-  else
-    cat "$RUN_DIR/record.md" >>"$hist"
-  fi
-  rm -f "$tmp"
-  log_info "history.md に記録しました（追加 ${n_added}件、承認待ち ${n_prop}件）"
+    grep -Fxq -- "$t" "$RUN_DIR/deleted-skills.txt" && continue
+    target="$ROOT/$rel"; before="$BEFORE/$rel"; after="$STAGE/$rel"
+    if [ -L "$before" ] || [ -L "$after" ]; then
+      if [ "$(readlink "$before" 2>/dev/null)" != "$(readlink "$after" 2>/dev/null)" ]; then
+        printf -- '- `%s`: シンボリックリンクの変更は記録していない\n' "$target" >>"$NOTES"
+      fi
+      continue
+    fi
+    [ -f "$before" ] || before=/dev/null
+    [ -f "$after" ] || after=/dev/null
+    cmp -s "$before" "$after" && continue
+    if grep -Fxq -- "$target" "$RUN_DIR/move-dests.txt"; then
+      printf -- '- `%s`: 移し先への追加は行き先の表の差分にまとめるため、作業用での直接の変更を別に記録していない\n' "$target" >>"$NOTES"
+      continue
+    fi
+    "$CR_SCRIPTS/diff-label.sh" "$before" "$after" "$target" >"$one"
+    [ $? -eq 1 ] || { printf -- '- `%s`: 差分を作れなかった\n' "$target" >>"$NOTES"; result_rc=1; continue; }
+    kind=修正
+    if [ "$after" = /dev/null ]; then kind=削除
+    elif [ "$before" = /dev/null ] || ! tail -n +3 "$one" | grep -q '^-'; then kind=追加; fi
+    if [ "$kind" = 修正 ] && s="$(mentioned_deleted_skill "$one")"; then
+      cat "$one" >>"$RUN_DIR/delete-$s.diff"
+      printf '%s\n' "$target" >>"$RUN_DIR/delete-$s.targets"
+      continue
+    fi
+    if ! record_change "$kind" "$target" "$one" "$t"; then
+      printf -- '- `%s`: 記録への追記に失敗した\n' "$target" >>"$NOTES"; result_rc=1
+    fi
+  done <"$RUN_DIR/files.txt"
+  while IFS= read -r t; do
+    if ! record_change 削除 "$ROOT/$t" "$RUN_DIR/delete-$t.diff" "$t" "$RUN_DIR/delete-$t.targets"; then
+      printf -- '- `%s`: スキルの削除の記録への追記に失敗した\n' "$ROOT/$t" >>"$NOTES"; result_rc=1
+    fi
+  done <"$RUN_DIR/deleted-skills.txt"
 }
 
-# 結果のファイルへ「承認なしで反映した変更と承認待ち」の節を書く。公開版の点検が同じ実行で結果を
-# 書いていれば、そのファイルへ足す。無ければ <日付>.md（同じ日の2回目以降は -2、-3）を作る。
-write_result() {
-  local n_added="$1" n_prop="$2" ids="$3" report="$PUBLIC_REPORT" day n
-  if [ -z "$report" ] || [ ! -f "$report" ]; then
+prepare_result() {
+  local day n
+  RESULT_REPORT="$PUBLIC_REPORT"
+  if [ -z "$RESULT_REPORT" ] || [ ! -f "$RESULT_REPORT" ]; then
     mkdir -p "$RESULT_DIR" || return 1
     day="$(date '+%Y-%m-%d')"
-    report="$RESULT_DIR/$day.md"
-    n=2
-    while [ -e "$report" ]; do report="$RESULT_DIR/$day-$n.md"; n=$((n + 1)); done
-    printf '# skill-audit の結果（%s）\n' "$day" >"$report" || return 1
+    RESULT_REPORT="$RESULT_DIR/$day.md"; n=2
+    while [ -e "$RESULT_REPORT" ]; do RESULT_REPORT="$RESULT_DIR/$day-$n.md"; n=$((n + 1)); done
+    printf '# skill-audit の結果（%s）\n' "$day" >"$RESULT_REPORT" || return 1
   fi
-  {
-    printf '\n## 承認なしで反映した変更と承認待ち\n\n'
-    printf '自動の精査（%s）が承認なしで反映した変更 %s件 / 承認待ちにした変更 %s件（%s）（スクリプトが書いた）。\n' "$ts" "$n_added" "$n_prop" "${ids:-なし}"
-    if [ "$n_added" -gt 0 ]; then
-      printf '戻すときは、Skill change-review の scripts/revert.sh に ID を渡す（変更の台帳 %s から直す前の版を戻す）。' "$(bash "${LEDGER_SH:-/dev/null}" path 2>/dev/null)"
-      printf '誤りだった場合は、Skill change-review の「8. 訂正」の手順で直し、訂正リスト（%s）に ID と「正しくは○○」を書く。\n\n' "$CORRECTIONS"
-      cat "$ADDED"
-    fi
-    if [ "$n_prop" -gt 0 ]; then
-      printf '\n### 承認待ちにした変更\n\n'
-      cat "$PROPOSED"
-    fi
-    if [ -s "$NOTES" ]; then
-      printf '\n## 注意\n\n'
-      cat "$NOTES"
-    fi
-  } >>"$report"
-  log_info "結果を書きました: ${report}"
 }
 
-BEFORE="$RUN_DIR/before"
-ADDED="$RUN_DIR/added.txt"
-PROPOSED="$RUN_DIR/proposed.txt"
-NOTES="$RUN_DIR/notes.txt"
 if [ -z "$CR_SCRIPTS" ]; then
-  log_error "Skill change-review の scripts が見つかりません。修正・削除は戻しますが、承認待ちは作れません"
-fi
-if ! mkdir -p "$BEFORE"; then
-  log_error "複製の置き場所を作れません: ${BEFORE}。精査を起動しません"
+  log_error "Skill change-review の scripts が見つかりません。直したいことを記録できないため、精査を起動しません"
   exit 1
 fi
-: >"$ADDED"; : >"$PROPOSED"; : >"$NOTES"
+mkdir -p "$BEFORE" "$STAGE" "$DEST_BASE" || exit 1
+: >"$RECORDED"; : >"$NOTES"
 list_targets >"$RUN_DIR/targets.txt"
 while IFS= read -r t; do
-  # -H で、自作のスキルのリンクは実体の中身を複製する（中のリンクはリンクのまま複製する）。
-  if ! cp -RpH "$ROOT/$t" "$BEFORE/$t"; then
-    log_error "複製に失敗しました: $ROOT/${t}。精査を起動しません"
-    exit 1
+  # 自作のスキルのリンクは実体を複製する。元のリンクと実体は書き換えない。
+  if ! cp -RpH "$ROOT/$t" "$BEFORE/$t" || ! cp -RpH "$ROOT/$t" "$STAGE/$t"; then
+    log_error "複製に失敗しました: $ROOT/${t}。精査を起動しません"; exit 1
   fi
 done <"$RUN_DIR/targets.txt"
-: >"$RUN_DIR/trash-before.txt"
-for e in "$ROOT/.skill-audit-trash/"*; do
-  [ -e "$e" ] && printf '%s\n' "$e" >>"$RUN_DIR/trash-before.txt"
-done
-# 古い複製を RUN_KEEP 件まで減らす。削除してよいのは runs の下だけである。
+# 古い複製の整理は従来どおり、runs の下だけを対象にする。
 ls -1d "$STATE_DIR/runs/"*/ 2>/dev/null | LC_ALL=C sort -r | tail -n +$((RUN_KEEP + 1)) | while IFS= read -r old; do
   rm -rf -- "${old%/}"
 done
-
+prepare_result || exit 1
 log_info "精査を起動します（hash=${current_hash}）"
 print_command
-(cd "$ROOT" && "${cmd[@]}")
-rc=$?
-
-review_changes
-record_history
-
-if [ "$rc" -ne 0 ]; then
-  log_error "精査が異常終了しました（終了コード ${rc}）。last-hash は更新しません"
-  exit "$rc"
+(cd "$STAGE" && "${cmd[@]}")
+rc=$?; result_rc="$rc"
+if [ "$rc" -eq 0 ]; then
+  if [ -f "$RUN_DIR/deletions.tsv" ]; then
+    while IFS=$'\t' read -r target reason || [ -n "$target" ]; do
+      case "$target" in "$ROOT"/*) rel="${target#$ROOT/}" ;; *) rel="" ;; esac
+      case "$rel" in ""|*..*|.*) printf -- '- `%s`: 対象外の削除の候補である\n' "$target" >>"$NOTES"; continue ;; esac
+      t="${rel%%/*}"
+      check_path="$STAGE/$rel"; linked=0
+      while [ "$check_path" != "$STAGE" ]; do
+        [ -L "$check_path" ] && linked=1
+        check_path="${check_path%/*}"
+      done
+      if ! grep -Fxq -- "$t" "$RUN_DIR/targets.txt" || [ "$linked" -eq 1 ]; then
+        printf -- '- `%s`: 対象外の削除の候補である\n' "$target" >>"$NOTES"; continue
+      fi
+      # 削除するのは作業用の複製だけである。
+      rm -rf -- "$STAGE/$rel"
+      [ -z "${reason:-}" ] || printf -- '- `%s`: 削除の候補の理由: %s\n' "$target" "$reason" >>"$NOTES"
+    done <"$RUN_DIR/deletions.tsv"
+  fi
+  review_changes
+else
+  printf -- '- 精査が異常終了したため（終了コード %s）、記録に足していない\n' "$rc" >>"$NOTES"
 fi
-
+{
+  printf '\n## 記録に足した直したいこと（ID・区分・対象・要約）\n\n'
+  if [ -s "$RECORDED" ]; then cat "$RECORDED"; else printf 'なし\n'; fi
+  if [ -s "$NOTES" ]; then printf '\n## 記録しなかった候補と補足\n\n'; cat "$NOTES"; fi
+  printf '\n元のスキルと history.md は変更していない。\n'
+} >>"$RESULT_REPORT"
+log_info "結果を書きました: $RESULT_REPORT"
+if [ "$result_rc" -ne 0 ]; then
+  log_error "精査または記録が失敗しました（終了コード ${result_rc}）。last-hash は更新しません"
+  exit "$result_rc"
+fi
 new_hash="$(compute_hash)"
 printf '%s\n' "$new_hash" >"$STATE_DIR/last-hash"
 log_info "精査が完了しました。last-hash を更新しました（hash=${new_hash}）"
