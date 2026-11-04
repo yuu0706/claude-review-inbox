@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review
 # change-review の corrections.sh（訂正リスト）の検査。置き場所は一時ディレクトリにする。
 set -u
 

@@ -1,5 +1,6 @@
 #!/bin/bash
 # claude-review-inbox を入れる・外す。何回実行しても結果は同じになる。
+# core/skills にあるスキルの分だけを扱う（公開版は知らせ・見直し・見回りの3つに分けて配るため。2026-11-04）。
 # 使い方: ./install.sh [--with-schedule | --no-schedule] [--yes] [--dry-run] [--uninstall]
 #   --with-schedule  週1回の見直し（memory-audit・feedback-mining・skill-audit）を聞かずに登録する
 #   --no-schedule    週1回の見直しを登録しない（登録済みなら外す）
@@ -49,11 +50,15 @@ CLAUDE_PATHS="${CLAUDE_REVIEW_CLAUDE_PATHS-$HOME/.local/bin/claude $HOME/.claude
 STATE_DIR="$HOME/.local/state/claude-review-inbox"
 PROPOSALS_DIR="$HOME/claude-reports/proposals"
 CHANGES_LOG="${CLAUDE_REVIEW_CHANGES_LOG:-$HOME/.local/state/claude-reports/changes/log.md}"
+# このリポジトリにあるスキルか。公開版は組ごとに一部のスキルだけを持つ。
+has_skill() { [ -d "$REPO/core/skills/$1" ]; }
 # SessionStart フックに登録するコマンド。report-inbox の件数の1行、2つの見回りの起動、外部スキルの新しい版の確認である。
-HOOK_CMDS=("$REPO/core/skills/report-inbox/scripts/unread.sh"
-  "$REPO/core/skills/repo-patrol/scripts/run-if-due.sh"
-  "$REPO/core/skills/secret-patrol/scripts/session-trigger.sh"
-  "$REPO/core/skills/skill-updates/scripts/run-if-due.sh")
+# このリポジトリにあるスキルの分だけを登録し、外す。
+HOOK_CMDS=()
+for c in report-inbox/scripts/unread.sh repo-patrol/scripts/run-if-due.sh \
+  secret-patrol/scripts/session-trigger.sh skill-updates/scripts/run-if-due.sh; do
+  has_skill "${c%%/*}" && HOOK_CMDS+=("$REPO/core/skills/$c")
+done
 # 旧版が登録したフック（スクリプトは削除済み）。report-inbox の unread.sh と同じ件数を出すため、見つけたら外す。
 LEGACY_HOOK_CMD="$REPO/core/hooks/session-start.sh"
 # 見回りの範囲の設定ファイル。repo-patrol と secret-patrol が読む。
@@ -64,8 +69,18 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 JOBS_FILE="$STATE_DIR/scheduled-jobs.tsv"
 LABEL_PREFIX="com.${user_name//./-}"
 # 週1回の見直しの定期実行: <ジョブ名>:<起動スクリプト>。repo-patrol と secret-patrol は SessionStart フックで動くため含めない。
-SCHEDULE_JOBS="memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh"
-SCHEDULE_QUESTION="週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか。claude の利用枠を使います [y/N]"
+# このリポジトリにあるジョブだけを登録し、外す（台帳は公開版の3つで共有するため、他の組のジョブには触れない）。
+SCHEDULE_JOBS=""
+schedule_names=""
+for j in memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh; do
+  has_skill "${j%%:*}" || continue
+  SCHEDULE_JOBS="${SCHEDULE_JOBS:+$SCHEDULE_JOBS }$j"
+  schedule_names="${schedule_names:+${schedule_names}・}${j%%:*}"
+done
+SCHEDULE_QUESTION="週1回の見直し（${schedule_names}）を登録しますか。claude の利用枠を使います [y/N]"
+# 見回りの範囲の設定は、repo-patrol か secret-patrol があるときだけ扱う。
+has_patrol=0
+{ has_skill repo-patrol || has_skill secret-patrol; } && has_patrol=1
 
 info() { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -609,7 +624,7 @@ check_prerequisites() {
   printf '  %s: %s\n' "Xcode のコマンドラインツール（必須）" "$clt"
   printf '  %s: %s\n' "Python 3.9 以上（必須）" "$py_state"
   st="なし"; [ -n "$CLAUDE_BIN" ] && st="あり（${CLAUDE_BIN}）"
-  printf '  %s: %s\n' "claude（週1回の見直しに必要）" "$st"
+  [ -n "$SCHEDULE_JOBS" ] && printf '  %s: %s\n' "claude（週1回の見直しに必要）" "$st"
 
   # 必須のもの
   if [ "$clt" = "なし" ]; then
@@ -632,7 +647,7 @@ check_prerequisites() {
     missing_required=1
   fi
 
-  if [ -z "$CLAUDE_BIN" ]; then
+  if [ -z "$CLAUDE_BIN" ] && [ -n "$SCHEDULE_JOBS" ]; then
     info "claude が見つからないため、週1回の見直しは登録しません（フックは使えます）"
   fi
 
@@ -652,14 +667,14 @@ check_prerequisites() {
 
 # ==== 外す ====
 if [ "$uninstall" -eq 1 ]; then
-  # review-loop は旧版が登録した定期実行である。旧版から移ってきた環境のために外す。
-  unregister_job review-loop
+  # review-loop は旧版が登録した定期実行である。旧版から移ってきた環境のために外す（見直しの組の役目）。
+  has_skill change-review && unregister_job review-loop
   for j in $SCHEDULE_JOBS; do unregister_job "${j%%:*}"; done
   remove_legacy_server
   # フックはリンクを消す前に外す。スキル置き場を経由して登録したフックを、リンクの先で同じものと判定するためである。
   if python_usable; then
     for f in "${settings_files[@]}"; do
-      for c in "${HOOK_CMDS[@]}" "$LEGACY_HOOK_CMD"; do remove_hook "$f" "$c"; done
+      for c in ${HOOK_CMDS[@]+"${HOOK_CMDS[@]}"} "$LEGACY_HOOK_CMD"; do remove_hook "$f" "$c"; done
     done
   else
     warn "Python（${PYTHON}）を使えないため、settings.json のフックを確かめられませんでした"
@@ -680,7 +695,10 @@ if [ "$uninstall" -eq 1 ]; then
       done
     done
   done
-  info "外しました。直したいことの記録（${CHANGES_LOG}）と否認・訂正リストの置き場所（${PROPOSALS_DIR}）と状態の置き場所（${STATE_DIR}）と見回りの範囲の設定ファイル（${PATROL_CONF}）は残しています。"
+  kept="状態の置き場所（${STATE_DIR}）"
+  has_skill change-review && kept="直したいことの記録（${CHANGES_LOG}）と否認・訂正リストの置き場所（${PROPOSALS_DIR}）と$kept"
+  [ "$has_patrol" -eq 1 ] && kept="$kept と見回りの範囲の設定ファイル（${PATROL_CONF}）"
+  info "外しました。${kept}は残しています。"
   exit 0
 fi
 
@@ -699,18 +717,22 @@ for d in "${skill_dirs[@]}"; do
   fi
 done
 
-# 記録と否認・訂正リストと状態の置き場所
-run mkdir -p "$(dirname "$CHANGES_LOG")" "$PROPOSALS_DIR" "$STATE_DIR"
+# 記録と否認・訂正リストと状態の置き場所（記録と否認・訂正リストは見直しの組の分）
+run mkdir -p "$STATE_DIR"
+has_skill change-review && run mkdir -p "$(dirname "$CHANGES_LOG")" "$PROPOSALS_DIR"
 
 # 旧版の常駐サーバーを外す。
 remove_legacy_server
 
 # 3.5 定期実行
 # 旧版が登録した週1回の棚卸し（review-loop）は、週1回の見直しの3つに置き換わったため外す。
-unregister_job review-loop
+has_skill change-review && unregister_job review-loop
 schedule=""
 # claude が無いと見直しは動かないため、聞かずに登録しない（登録済みのものは変えない）。
-if [ -z "$CLAUDE_BIN" ] && [ "$schedule_opt" != "--no-schedule" ]; then
+# このリポジトリに週1回の見直しが無ければ、聞かずに何もしない。
+if [ -z "$SCHEDULE_JOBS" ]; then
+  schedule_opt="--skip"
+elif [ -z "$CLAUDE_BIN" ] && [ "$schedule_opt" != "--no-schedule" ]; then
   schedule_opt="--skip"
 fi
 case "$schedule_opt" in
@@ -741,13 +763,17 @@ elif [ "$schedule" = "0" ]; then
 fi
 
 # 3.6 見回りの範囲（repo-patrol と secret-patrol）
-setup_patrol_conf
+[ "$has_patrol" -eq 1 ] && setup_patrol_conf
 
 # 4. SessionStart フック
 for f in "${settings_files[@]}"; do
   remove_hook "$f" "$LEGACY_HOOK_CMD"
-  for c in "${HOOK_CMDS[@]}"; do add_hook "$f" "$c"; done
+  for c in ${HOOK_CMDS[@]+"${HOOK_CMDS[@]}"}; do add_hook "$f" "$c"; done
 done
 
 info ""
-info "入れました。直したいことは会話の開始時に件数が出ます。"
+if has_skill report-inbox; then
+  info "入れました。直したいことは会話の開始時に件数が出ます。"
+else
+  info "入れました。会話の開始時の知らせが要るなら、claude-report-inbox も入れます。"
+fi

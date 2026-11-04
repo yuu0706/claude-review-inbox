@@ -1,3 +1,4 @@
+# requires: change-review
 """直したいことの追記・区分・件数・状態変更を検査する。"""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime

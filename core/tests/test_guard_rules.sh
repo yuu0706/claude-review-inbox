@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review feedback-mining memory-audit repo-patrol report-inbox secret-patrol skill-audit
 # 南京錠（定期実行の claude -p に書き換えさせない場所）が、3つの定期実行の拒否の規則に入ることの検査。
 # 安全のための規則のスキル・フックと定期実行のスクリプト・設定ファイル・変更の台帳を、リンクの表記と実体のパスの両方で拒否する。
 # HOME を一時ディレクトリに差し替え、--dry-run で組み立てた引数（--disallowedTools の中身）だけを見る。本物の claude は起動しない。

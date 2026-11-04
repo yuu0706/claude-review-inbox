@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review memory-audit repo-patrol report-inbox secret-patrol skill-updates
 # install.sh の検査。一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。
 # 本物の HOME・launchctl には触れない。
 set -u

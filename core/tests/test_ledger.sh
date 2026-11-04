@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review report-inbox
 # 変更の台帳（change-review の ledger.sh・revert.sh）と、会話の開始時の知らせ（report-inbox の unread.sh）の検査。
 # HOME と台帳の置き場所を一時ディレクトリにする。
 set -u

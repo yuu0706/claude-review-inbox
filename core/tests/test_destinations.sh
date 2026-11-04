@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review
 # 「消える記述の行き先」の共通部品（change-review の destinations.sh・propose.sh・memory-index.py）の検査。
 # 一時ディレクトリだけを使う。
 set -u

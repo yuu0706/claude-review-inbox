@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: memory-audit feedback-mining skill-audit repo-patrol secret-patrol
 # install.sh の定期実行（週1回の見直しの3つ）と見回りの範囲（patrol.conf）の検査。
 # 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl には触れない。
 set -u

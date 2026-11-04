@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: report-inbox memory-audit feedback-mining skill-audit
 # install.sh の「必要なものの確認」の検査。一時の HOME を作る。
 # xcode-select・/usr/bin/python3・claude・launchctl を偽のコマンドに差し替え、本物の HOME には触れない。
 set -u

@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review feedback-mining memory-audit skill-audit
 # スキルの置き場所の直下にあるリンクの先の実体を、3つの定期実行のスクリプトが許可・拒否の規則に足すことの検査。
 # HOME を一時ディレクトリに差し替え、--dry-run の出力だけを見る。本物の claude は起動しない。
 set -u

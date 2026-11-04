@@ -8,6 +8,18 @@
 
 本書は、claude-review-inbox の入れ方・更新・外し方と、仕組みを説明する。
 
+## 0. 知らせと見回りを別のリポジトリに分けた（今入れている人へ）
+
+2026-11 の版で、会話の開始時の知らせ（`report-inbox`）を [claude-report-inbox](https://github.com/yuu0706/claude-report-inbox) に、見回り（`repo-patrol`・`secret-patrol`・`skill-updates`）を [claude-patrol](https://github.com/yuu0706/claude-patrol) に分けた。このリポジトリには、直したいことの記録と週1回の見直しが残る。
+
+今の版を入れている人は、次の順に移る。先に `git pull` すると、消えたスクリプトを指すフックとリンクが残るためである。
+
+1. 今の版のまま `./install.sh --uninstall` を実行する。
+2. `git pull` の後に `./install.sh` を実行する。
+3. 知らせと見回りが要るなら、それぞれのリポジトリを入れる（各リポジトリの README の「入れ方」）。
+
+会話の開始時に未対応の件数を出したいときは、claude-report-inbox も一緒に入れる。入れなくても、記録と週1回の見直しは使える。
+
 ## 1. 概要
 
 Claude Codeの決まり（スキル・メモリ・CLAUDE.md）の直したいことを、1本のMarkdownの記録に1件ずつ足す。定期実行は対象のファイルを直さない。会話のClaudeが記録を読み、区分に従って反映する。
@@ -23,9 +35,6 @@ Claude Codeの決まり（スキル・メモリ・CLAUDE.md）の直したいこ
 | --- | --- |
 | 承認の決まり | Skill `change-review`。記録の書式・区分の判定・会話での反映の手順を定める |
 | 週1回の見直し（任意） | Skill `memory-audit`（メモリ）・`skill-audit`（スキル）・`feedback-mining`（会話の履歴からの決まりの案）。週1回 `claude -p` を動かす。追加・修正・削除・統合のすべてを記録に足す。対象のファイルは直さない。`install.sh` が登録するかを聞く（「4.1 週1回の見直し」） |
-| 結果の一覧 | Skill `report-inbox`。定期実行の結果の未読と失敗を、会話の開始時に1行で出す（SessionStart フック） |
-| 見回り | Skill `repo-patrol`（手元のリポジトリの未コミット・未 push）と `secret-patrol`（秘密情報と個人情報の置き忘れ）。会話の開始時に SessionStart フックが裏で動かす。見回る範囲は `install.sh` が聞く（「4.2 見回りの範囲」） |
-| 外部スキルの新しい版 | Skill `skill-updates`。その日の最初のセッションの開始時に、`~/skills-lock.json` に載っている外部スキルの上流を GitHub API で確かめ、新しい版があればそのセッションの冒頭で知らせて今対応するかを問う。自動では更新しない |
 
 ### 1.1 区分の判断
 
@@ -49,7 +58,7 @@ Claude Codeの決まり（スキル・メモリ・CLAUDE.md）の直したいこ
 | 過去の変更の台帳 | 新しい記録は作らない。過去のIDは`ledger.sh show`で読み、`revert.sh <ID>`で戻せる |
 | 訂正リスト | 誤りと分かって直した変更を「正しくは○○」で残す。同じ種類が2回訂正されたら、以後その種類を要確認にする |
 | 検問所 | `feedback-mining`には、会話の履歴から利用者本人の発言だけを取り出したファイルを渡す。元のjsonlの読み取りは拒否する |
-| 会話の開始時の知らせ | 未対応があれば`直したいこと N件（うち要確認 M件、<最も古いID>〜）`を出す |
+| 会話の開始時の知らせ | claude-report-inbox を入れていれば、未対応があるときに`直したいこと N件（うち要確認 M件、<最も古いID>〜）`を出す |
 
 ## 2. 構成
 
@@ -58,10 +67,7 @@ Claude Codeの決まり（スキル・メモリ・CLAUDE.md）の直したいこ
 | `install.sh` | 入れる・外す。オプションは `--with-schedule`・`--no-schedule`・`--yes`・`--dry-run`・`--uninstall` |
 | `core/skills/change-review/` | 記録と反映の手順（`SKILL.md`）と`scripts/`（追記`new-change.sh`、修正・削除の案`propose.sh`、集計`count.sh`、状態の更新`changes.sh`、過去の台帳`ledger.sh`と戻し`revert.sh`、南京錠`link-scopes.sh`） |
 | `core/skills/memory-audit/`・`feedback-mining/`・`skill-audit/` | 週1回の見直しの3つ。各スキルが `launchd/<ジョブ名>.plist.template` を持つ |
-| `core/skills/report-inbox/` | 定期実行の結果の一覧と既読の管理。`scripts/unread.sh` を SessionStart フックに登録する |
-| `core/skills/repo-patrol/`・`secret-patrol/` | 見回りの2つ。`scripts/run-if-due.sh`・`scripts/session-trigger.sh` を SessionStart フックに登録する |
-| `core/skills/skill-updates/` | 外部から入れたスキルの上流の新しい版の確認。`scripts/run-if-due.sh` を SessionStart フックに登録する |
-| `core/tests/` | テスト。`core/tests/run.sh` で全部動く |
+| `core/tests/` | テスト。`core/tests/run.sh` で動く。頭の `# requires:` に書いたスキルが無いテストは飛ばす（3つのリポジトリで同じテストを持つため） |
 | `LICENSE` | MIT License |
 
 ## 3. 仕組み
@@ -116,30 +122,29 @@ flowchart LR
    ./install.sh
    ```
 
-   途中で、週1回の見直しを登録するか（「4.1」）と、見回りの範囲（「4.2」）を聞かれる。
+   途中で、週1回の見直しを登録するか（「4.1」）を聞かれる。
 
    最初に必要なものを確かめ、足りないものは入れる前に1つずつ聞く（「4.0 必要なものの確認」）。
 
-4. Claude Codeの会話を開始する。未対応の件数が出たら、会話のClaudeが記録を読む。要確認の一覧を示されたら「反映して」か番号を指定して承認する。
+4. Claude Codeの会話を開始する。claude-report-inbox を入れていれば、未対応の件数が出る。会話で「直したいことを見せて」と伝えると、会話のClaudeが記録を読む。要確認の一覧を示されたら「反映して」か番号を指定して承認する。
 
-`install.sh` は次を行う。何回実行しても結果は同じになる。
+`install.sh` は次を行う。何回実行しても結果は同じになる。`install.sh` は claude-report-inbox・claude-patrol と同じもので、`core/skills/` にあるスキルの分だけを扱う。
 
 | No | 操作 | 備考 |
 | --- | --- | --- |
 | 1 | 必要なものを確かめ、足りないものは聞いてから入れる | 「4.0 必要なものの確認」を参照する |
-| 2 | `core/skills/*`（全スキル）を、スキル置き場へシンボリックリンクで置く。旧版が置いた `review-loop` のリンク（このリポジトリを指すもの）は消す（`.trash` へは移さない） | スキル置き場は、各設定ディレクトリ（`~/.claude` と、共通の設定ファイルで指定した2つ目以降。「4.3 環境ごとの設定」）の `skills`。リンクなら実体を解決し、同じ実体へ二重に置かない。リンクに書かれたパスがリポジトリ内のパスと一致すれば何もしない。一致しないが実体をたどるとこのリポジトリを指すリンク（リポジトリを移す前の旧位置を経由するリンクなど）は、その場で張り直す。それ以外で同じ名前のものが既にあれば `<スキル置き場>/.trash/<YYYYMMDD-HHMMSS>-<名前>` へ移してから置く |
+| 2 | `core/skills/*`（全スキル）を、スキル置き場へシンボリックリンクで置く。旧版が置いた `review-loop` のリンク（このリポジトリを指すもの）は消す（`.trash` へは移さない） | スキル置き場は、各設定ディレクトリ（`~/.claude` と、共通の設定ファイルで指定した2つ目以降。「4.2 環境ごとの設定」）の `skills`。リンクなら実体を解決し、同じ実体へ二重に置かない。リンクに書かれたパスがリポジトリ内のパスと一致すれば何もしない。一致しないが実体をたどるとこのリポジトリを指すリンク（リポジトリを移す前の旧位置を経由するリンクなど）は、その場で張り直す。それ以外で同じ名前のものが既にあれば `<スキル置き場>/.trash/<YYYYMMDD-HHMMSS>-<名前>` へ移してから置く |
 | 3 | 旧版の常駐サーバーを外す | `~/Library/LaunchAgents/com.*.claude-review-inbox.plist` のうち、このリポジトリの旧サーバーを指すものだけを `launchctl bootout` して plist を消す |
 | 4 | 週1回の見直しを、聞いてから登録する | 「4.1 週1回の見直し」を参照する。旧版が登録した `review-loop` の定期実行は外す。登録した定期実行は `~/.local/state/claude-review-inbox/scheduled-jobs.tsv` に記録する |
-| 5 | 見回りの範囲を聞き、設定ファイルに書く | 「4.2 見回りの範囲」を参照する |
-| 6 | 各設定ディレクトリの `settings.json` の `hooks.SessionStart` に、`report-inbox` の `unread.sh`・`repo-patrol` の `run-if-due.sh`・`secret-patrol` の `session-trigger.sh`・`skill-updates` の `run-if-due.sh` を足す | Python（標準ライブラリの `json`）で行う。同じ文字列か、`~` と環境変数を展開してリンクを解決した先が同じファイルのコマンドが既にあれば足さない。書き換える前に `settings.json.bak-<YYYYMMDD-HHMMSS>` を残す。旧版が足した `core/hooks/session-start.sh` は外す |
-| 7 | 記録の親ディレクトリと`~/claude-reports/proposals/`と`~/.local/state/claude-review-inbox/`を作る | 否認リストと訂正リストの置き場所は変えない |
+| 5 | 旧版が `settings.json` の `hooks.SessionStart` に足した `core/hooks/session-start.sh` を外す | このリポジトリはフックを足さない。Python（標準ライブラリの `json`）で行い、書き換える前に `settings.json.bak-<YYYYMMDD-HHMMSS>` を残す |
+| 6 | 記録の親ディレクトリと`~/claude-reports/proposals/`と`~/.local/state/claude-review-inbox/`を作る | 否認リストと訂正リストの置き場所は変えない |
 
 設定は環境変数で変えられる。
 
 | 変数 | 既定値 | 用途 |
 | --- | --- | --- |
 | `CLAUDE_REVIEW_PYTHON` | `/usr/bin/python3` | `settings.json` を書き換える Python（3.9 以上）。指定したときは Xcode のコマンドラインツールを確かめない |
-| `XDG_CONFIG_HOME` | `~/.config` | 見回りの範囲の設定ファイル `<XDG_CONFIG_HOME>/claude-review-inbox/patrol.conf` と、共通の設定ファイル `jobs.conf` の置き場所 |
+| `XDG_CONFIG_HOME` | `~/.config` | 共通の設定ファイル `<XDG_CONFIG_HOME>/claude-review-inbox/jobs.conf` の置き場所 |
 | `CLAUDE_REVIEW_CONFIG_DIRS` | jobs.conf の値、無ければ `~/.claude` | スキルのリンクとフックを置く設定ディレクトリの一覧（コロン区切り）。`~/.claude` は常に含める |
 
 
@@ -161,7 +166,6 @@ flowchart LR
 | 出るもの | いつ | なぜ |
 | --- | --- | --- |
 | Xcode のコマンドラインツールを入れる画面 | 1 で `y` と答えた直後 | macOS の `xcode-select --install` が開く。フックの設定に使う `/usr/bin/python3` の実体を入れるため |
-| フォルダへのアクセスの許可 | 「4.2 見回りの範囲」で書類・デスクトップ・ダウンロードを入れた（またはその下のフォルダをリポジトリの置き場所にした）とき、初めて見回る時点 | `secret-patrol`・`repo-patrol` がそのフォルダを読むため。入れなければ出ない |
 
 ### 4.1 週1回の見直し
 
@@ -179,23 +183,9 @@ flowchart LR
 - `~/Library/LaunchAgents/` に、同じジョブの起動スクリプトを指す plist が別のラベルで既にあれば、そのラベルを引き継ぐ。書き換える前の plist は `~/.local/state/claude-review-inbox/plist-backup/<YYYYMMDD-HHMMSS>/` に複製する。
 - `skill-audit`の過去の変更の記録（`history.md`）と複製（`history/`）は、`${SKILL_AUDIT_STATE:-~/.local/state/skill-audit}/`に残す。新しい変更は直したいことの記録に足す。
 
-### 4.2 見回りの範囲
+### 4.2 環境ごとの設定
 
-`repo-patrol` と `secret-patrol` が、書類・デスクトップ・ダウンロードのフォルダと手元のリポジトリを見回るかは、`install.sh` が聞いて設定ファイル `${XDG_CONFIG_HOME:-~/.config}/claude-review-inbox/patrol.conf` に書く。見回らないフォルダを不意に読み、macOS の許可のダイアログを出さないためである。
-
-| 問い | 設定ファイルの項目 |
-| --- | --- |
-| 「書類・デスクトップ・ダウンロードのフォルダを、個人情報の置き忘れの見回りに入れますか。初めて見回るときに、macOS がフォルダへのアクセスの許可を求めます [y/N]」 | `PERSONAL_FOLDERS=yes` か `no`。`no` なら `secret-patrol` は Claude の記録と手元のリポジトリだけを見回る |
-| 「手元のリポジトリを置いているフォルダを入力してください（例: ~/Documents/git。空なら見回りません）」 | `REPO_ROOTS=<フォルダ>`。複数はコロンで区切る（`repo-patrol` は先頭だけを使う）。`~/Documents`・`~/Desktop`・`~/Downloads` の下を答えたときは、許可のダイアログが出ることを表示する |
-
-- 設定ファイルが既にあれば聞かずにその値を使う。変えるときはファイルを直す。
-- `--yes` のときは聞かずに `PERSONAL_FOLDERS=no`・`REPO_ROOTS=`（空）とする。標準入力が端末でなく `--yes` も無いときは、聞かず、設定ファイルも書かない。
-- 設定ファイルが無いまま見回りが動いたときは、3つのフォルダとリポジトリを見回らない。
-- `--uninstall` は設定ファイルを消さない。
-
-### 4.3 環境ごとの設定
-
-定期実行の6つのスキルは、環境ごとの値を次の2種類のファイルから読む。どちらも無ければ既定値で動く。`install.sh` はどちらも作らない。
+定期実行のスキルは、環境ごとの値を次の2種類のファイルから読む。`jobs.conf` は claude-report-inbox・claude-patrol と共有する（`SECRET_PATROL_*` は claude-patrol が読む）。どちらも無ければ既定値で動く。`install.sh` はどちらも作らない。
 
 | ファイル | 読むもの | 書くもの |
 | --- | --- | --- |
@@ -267,7 +257,7 @@ git pull
 | 要確認を承認する | 一覧を示された会話で「反映して」（その時点で示した全部）か番号を伝える |
 | 却下する | 番号と理由を伝える。記録は見送りにし、否認リストに理由を残す |
 | 却下を取り消す | IDと理由を会話で伝える。利用者の承認を確かめて否認リストの該当行を消す |
-| 定期実行の結果を見る | 会話で「未読の結果を見せて」と伝える。Skill `report-inbox`の手順で読み、既読にする |
+| 定期実行の結果を見る | claude-report-inbox を入れていれば、会話で「未読の結果を見せて」と伝える。Skill `report-inbox`の手順で読み、既読にする。入れていなければ `~/claude-reports/<ジョブ名>/` の Markdown を開く |
 | 入れた変更を戻す | 会話で「<ID>を戻して」と伝える。直す前の複製で戻す。過去の台帳のIDは`revert.sh <ID>`で戻す。誤りは訂正リストに残す |
 
 ## 9. テスト
@@ -279,12 +269,10 @@ core/tests/run.sh
 | テスト | 確かめる内容 |
 | --- | --- |
 | `core/tests/test_changes.py` | 記録の追記と同時採番、区分の判定、件数の集計、状態の更新、差分の見出しとコードの囲み |
-| `core/tests/test_install.sh` | 一時の`HOME`と偽の`launchctl`で、全スキルのリンク・4つのフック・2回実行・`--dry-run`・`--uninstall`・旧版の後始末・記録の親ディレクトリ・導入後の案内を確かめる |
-| `core/tests/test_install_schedule.sh` | 一時の `HOME` と偽の `launchctl` で、週1回の見直しの登録（非端末・聞かれて `n`／`y`・`--with-schedule`・`--no-schedule`・`claude` が無いとき・2回実行・既存のラベルの引き継ぎ）、旧版の後始末、`--uninstall`、見回りの範囲の問いと `patrol.conf`、`--dry-run` の表示。端末からの実行は疑似端末で模す |
-| `core/tests/test_install_prereq.sh` | 一時の`HOME`と偽のコマンドで、Xcodeのコマンドラインツール・Python・claudeの確認、非端末・`--yes`・`--dry-run`、jqを使わないフックの追加と削除を確かめる |
+| `core/tests/test_install_schedule.sh`（全部入りでだけ動く） | 一時の `HOME` と偽の `launchctl` で、週1回の見直しの登録（非端末・聞かれて `n`／`y`・`--with-schedule`・`--no-schedule`・`claude` が無いとき・2回実行・既存のラベルの引き継ぎ）、旧版の後始末、`--uninstall`、見回りの範囲の問いと `patrol.conf`、`--dry-run` の表示。端末からの実行は疑似端末で模す |
 | `core/tests/test_link_scopes.sh` | 一時の `HOME` に実体が別のフォルダにあるリンクのスキルを置き、3つの定期実行の `--dry-run` の出力に実体の `Read` が1回ずつ入ること、実体の無いリンクで落ちないこと、リンクの先の実体の `Edit` を拒否すること |
-| `core/tests/test_guard_rules.sh` | 南京錠: 3つの定期実行の `--dry-run` の `--disallowedTools` に、安全のための規則のスキル全体・フックと定期実行のスクリプト・`CLAUDE.md`・`settings.json`・`settings.local.json`・変更の台帳が、リンクの表記と実体のパスの両方で入ること、許可の側に入らないこと、`--permission-mode default` が付くこと、jobs.conf で一覧を変えられること |
-| `core/tests/test_ledger.sh` | 変更の台帳: 記録（修正・追加・スキルの削除）とコミットのメッセージ、正しくない ID と相対パスの拒否、`revert.sh` で戻すこと・戻す前の内容を残すこと・2回目は戻さないこと |
+| `core/tests/test_guard_rules.sh`（3つを一緒に入れた全部入りでだけ動く） | 南京錠: 3つの定期実行の `--dry-run` の `--disallowedTools` に、安全のための規則のスキル全体・フックと定期実行のスクリプト・`CLAUDE.md`・`settings.json`・`settings.local.json`・変更の台帳が、リンクの表記と実体のパスの両方で入ること、許可の側に入らないこと、`--permission-mode default` が付くこと、jobs.conf で一覧を変えられること |
+| `core/tests/test_ledger.sh`（全部入りでだけ動く） | 変更の台帳: 記録（修正・追加・スキルの削除）とコミットのメッセージ、正しくない ID と相対パスの拒否、`revert.sh` で戻すこと・戻す前の内容を残すこと・2回目は戻さないこと |
 | `core/tests/test_destinations.sh` | 修正と削除の案に付ける、消える記述の行き先 |
 | `core/skills/*/scripts/test.sh` | 各スキル。起動するコマンドは常に `CLAUDE_LAUNCHER` で偽物に差し替え、本物の `claude` を起動しない。jobs.conf と環境変数の優先順位、設定ディレクトリが2つある場合、見回りの範囲の設定ファイルが無い・ある場合を含む |
 
