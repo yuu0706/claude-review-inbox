@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review
 # memory-audit scripts の検査。HOME を一時ディレクトリに差し替え、偽のメモリを作って実行する。実際の claude は起動しない。
 set -u
 # 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。

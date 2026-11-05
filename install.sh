@@ -1,8 +1,8 @@
 #!/bin/bash
 # claude-review-inbox を入れる・外す。何回実行しても結果は同じになる。
-# core/skills にあるスキルの分だけを扱う（公開版は知らせ・見直し・見回りの3つに分けて配るため。2026-11-04）。
+# core/skills にあるスキルの分だけを扱う（公開版は1スキル＝1リポジトリで配るため。2026-11-05）。
 # 使い方: ./install.sh [--with-schedule | --no-schedule] [--yes] [--dry-run] [--uninstall]
-#   --with-schedule  週1回の見直し（memory-audit・feedback-mining・skill-audit）を聞かずに登録する
+#   --with-schedule  週1回の見直し（memory-audit・feedback-mining・skill-audit・weakness-review のうち、あるもの）を聞かずに登録する
 #   --no-schedule    週1回の見直しを登録しない（登録済みなら外す）
 #   --yes            足りないもの（Xcode のコマンドラインツール）を聞かずに入れる。
 #                    見回りの範囲は聞かずに「書類・デスクトップ・ダウンロードを入れない、リポジトリを見回らない」とする
@@ -72,7 +72,7 @@ LABEL_PREFIX="com.${user_name//./-}"
 # このリポジトリにあるジョブだけを登録し、外す（台帳は公開版の3つで共有するため、他の組のジョブには触れない）。
 SCHEDULE_JOBS=""
 schedule_names=""
-for j in memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh; do
+for j in memory-audit:run.sh feedback-mining:run.sh skill-audit:run-audit.sh weakness-review:run.sh; do
   has_skill "${j%%:*}" || continue
   SCHEDULE_JOBS="${SCHEDULE_JOBS:+$SCHEDULE_JOBS }$j"
   schedule_names="${schedule_names:+${schedule_names}・}${j%%:*}"
@@ -771,9 +771,27 @@ for f in "${settings_files[@]}"; do
   for c in ${HOOK_CMDS[@]+"${HOOK_CMDS[@]}"}; do add_hook "$f" "$c"; done
 done
 
+# change-review があるか（このリポジトリか、スキル置き場に）。終わりの案内と注意に使う（2026-11-05）。
+cr_found=0
+has_skill change-review && cr_found=1
+for d in "${skill_dirs[@]}"; do
+  [ -f "$d/change-review/scripts/link-scopes.sh" ] && cr_found=1
+done
+
 info ""
-if has_skill report-inbox; then
+if has_skill report-inbox && [ "$cr_found" -eq 1 ]; then
   info "入れました。直したいことは会話の開始時に件数が出ます。"
+elif has_skill report-inbox; then
+  info "入れました。定期実行の結果と失敗は会話の開始時に知らせます。"
 else
   info "入れました。会話の開始時の知らせが要るなら、claude-report-inbox も入れます。"
+fi
+# memory-audit・feedback-mining・skill-audit・weakness-review は、change-review の link-scopes.sh が無いと起動しない。
+# 1スキルずつのリポジトリで入れたとき、change-review が入っていなければ知らせる（2026-11-05）。
+needs_cr=""
+for s in memory-audit feedback-mining skill-audit weakness-review; do
+  has_skill "$s" && needs_cr="${needs_cr:+${needs_cr}・}$s"
+done
+if [ -n "$needs_cr" ] && [ "$cr_found" -eq 0 ]; then
+  warn "${needs_cr} は change-review が無いと動きません。claude-change-review も入れてください（https://github.com/yuu0706/claude-change-review）"
 fi

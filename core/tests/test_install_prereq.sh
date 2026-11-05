@@ -119,7 +119,7 @@ check "何も聞かない" '! asked "\[y/N\]"'
 check "確認の結果を表で出す" 'asked "^必要なものの確認:" && asked "Xcode のコマンドラインツール（必須）: あり" && asked "claude（週1回の見直しに必要）: あり"'
 check "何も入れない" '! called "xcode-select --install"'
 out="$(tty_install $'y\n')"
-check "claude があれば週1回の見直しを聞き、y なら登録する" 'asked "週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか" && [ -f "$HOME/Library/LaunchAgents/$JOB_PLIST_NAME" ]'
+check "claude があれば週1回の見直しを聞き、y なら登録する" 'asked "週1回の見直し（memory-audit・feedback-mining・skill-audit" && [ -f "$HOME/Library/LaunchAgents/$JOB_PLIST_NAME" ]'
 
 echo "== コマンドラインツールが無い: y"
 setup claude

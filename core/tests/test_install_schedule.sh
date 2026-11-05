@@ -1,5 +1,5 @@
 #!/bin/bash
-# requires: memory-audit feedback-mining skill-audit repo-patrol secret-patrol
+# requires: memory-audit feedback-mining skill-audit weakness-review repo-patrol secret-patrol
 # install.sh の定期実行（週1回の見直しの3つ）と見回りの範囲（patrol.conf）の検査。
 # 一時の HOME を作り、launchctl を偽のコマンドに差し替えて実行する。本物の HOME・launchctl には触れない。
 set -u
@@ -57,7 +57,7 @@ U="com.$(id -un | tr . -)"
 JOBS="$HOME/.local/state/claude-review-inbox/scheduled-jobs.tsv"
 CONF="$HOME/.config/claude-review-inbox/patrol.conf"
 UIDN="$(id -u)"
-Q_SCHEDULE="週1回の見直し（memory-audit・feedback-mining・skill-audit）を登録しますか。claude の利用枠を使います [y/N]"
+Q_SCHEDULE="週1回の見直し（memory-audit・feedback-mining・skill-audit・weakness-review）を登録しますか。claude の利用枠を使います [y/N]"
 Q_PERSONAL="書類・デスクトップ・ダウンロードのフォルダを、個人情報の置き忘れの見回りに入れますか。初めて見回るときに、macOS がフォルダへのアクセスの許可を求めます [y/N]"
 Q_REPOS="手元のリポジトリを置いているフォルダを入力してください（例: ~/Documents/git。空なら見回りません）"
 
@@ -83,7 +83,7 @@ tree_sig() {
 }
 px() { plutil -extract "$2" raw "$1" 2>/dev/null; }
 has() { printf '%s' "$out" | grep -Fq -- "$1"; }
-no_jobs() { [ ! -e "$AG/$U.memory-audit.plist" ] && [ ! -e "$AG/$U.feedback-mining.plist" ] && [ ! -e "$AG/$U.skill-audit.plist" ]; }
+no_jobs() { [ ! -e "$AG/$U.memory-audit.plist" ] && [ ! -e "$AG/$U.feedback-mining.plist" ] && [ ! -e "$AG/$U.skill-audit.plist" ] && [ ! -e "$AG/$U.weakness-review.plist" ]; }
 
 echo "== 非端末で指定なし"
 out="$("$REPO/install.sh" </dev/null 2>&1)"
@@ -110,24 +110,24 @@ out="$(tty_install $'y\n')"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "見回りの範囲は聞かない" '! has "$Q_PERSONAL" && has "見回りの範囲は設定済みです" && [ "$(cat "$CONF")" = "$conf_before" ]'
-check "3つの plist を作る" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.feedback-mining.plist" ] && [ -f "$AG/$U.skill-audit.plist" ]'
-check "起動スクリプトはスキル置き場の中" '[ "$(px "$AG/$U.memory-audit.plist" ProgramArguments.1)" = "$S2/memory-audit/scripts/run.sh" ] && [ "$(px "$AG/$U.feedback-mining.plist" ProgramArguments.1)" = "$S2/feedback-mining/scripts/run.sh" ] && [ "$(px "$AG/$U.skill-audit.plist" ProgramArguments.1)" = "$S2/skill-audit/scripts/run-audit.sh" ]'
-check "時刻はひな形のまま（memory-audit 10:30・feedback-mining 11:00・skill-audit 10:00）" '[ "$(px "$AG/$U.memory-audit.plist" StartCalendarInterval.Minute)" = "30" ] && [ "$(px "$AG/$U.feedback-mining.plist" StartCalendarInterval.Hour)" = "11" ] && [ "$(px "$AG/$U.skill-audit.plist" StartCalendarInterval.Hour)" = "10" ]'
+check "4つの plist を作る" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.feedback-mining.plist" ] && [ -f "$AG/$U.skill-audit.plist" ] && [ -f "$AG/$U.weakness-review.plist" ]'
+check "起動スクリプトはスキル置き場の中" '[ "$(px "$AG/$U.memory-audit.plist" ProgramArguments.1)" = "$S2/memory-audit/scripts/run.sh" ] && [ "$(px "$AG/$U.feedback-mining.plist" ProgramArguments.1)" = "$S2/feedback-mining/scripts/run.sh" ] && [ "$(px "$AG/$U.skill-audit.plist" ProgramArguments.1)" = "$S2/skill-audit/scripts/run-audit.sh" ] && [ "$(px "$AG/$U.weakness-review.plist" ProgramArguments.1)" = "$S2/weakness-review/scripts/run.sh" ]'
+check "時刻はひな形のまま（memory-audit 10:30・feedback-mining 11:00・skill-audit 10:00・weakness-review 12:00）" '[ "$(px "$AG/$U.memory-audit.plist" StartCalendarInterval.Minute)" = "30" ] && [ "$(px "$AG/$U.feedback-mining.plist" StartCalendarInterval.Hour)" = "11" ] && [ "$(px "$AG/$U.skill-audit.plist" StartCalendarInterval.Hour)" = "10" ] && [ "$(px "$AG/$U.weakness-review.plist" StartCalendarInterval.Hour)" = "12" ]'
 check "launchctl bootstrap で登録する" 'grep -Fxq "launchctl bootstrap gui/$UIDN $AG/$U.skill-audit.plist" "$CALLS"'
-check "台帳に3つを記録する" '[ "$(wc -l <"$JOBS" | tr -d " ")" = "3" ] && grep -q "^memory-audit	$U.memory-audit	$AG/$U.memory-audit.plist	0$" "$JOBS"'
+check "台帳に4つを記録する" '[ "$(wc -l <"$JOBS" | tr -d " ")" = "4" ] && grep -q "^memory-audit	$U.memory-audit	$AG/$U.memory-audit.plist	0$" "$JOBS"'
 
-echo "== --no-schedule は登録済みの3つを外す"
+echo "== --no-schedule は登録済みの4つを外す"
 : >"$CALLS"
 out="$("$REPO/install.sh" --no-schedule </dev/null 2>&1)"
 check "plist を消し、bootout する" 'no_jobs && grep -Fxq "launchctl bootout gui/$UIDN/$U.feedback-mining" "$CALLS"'
-check "台帳から消す" '[ ! -f "$JOBS" ] || ! grep -q "audit\|mining" "$JOBS"'
+check "台帳から消す" '[ ! -f "$JOBS" ] || ! grep -q "audit\|mining\|weakness" "$JOBS"'
 
 echo "== --with-schedule"
 : >"$CALLS"
 out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
 rc=$?
 check "終了コード0で聞かない" '[ "$rc" -eq 0 ] && ! printf "%s" "$out" | grep -q "\[y/N\]"'
-check "3つを登録する" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.skill-audit.plist" ]'
+check "4つを登録する" '[ -f "$AG/$U.memory-audit.plist" ] && [ -f "$AG/$U.skill-audit.plist" ] && [ -f "$AG/$U.weakness-review.plist" ]'
 sig="$(tree_sig)"
 : >"$CALLS"
 "$REPO/install.sh" --with-schedule </dev/null >/dev/null 2>&1
@@ -151,15 +151,23 @@ sed -e "s|@@LABEL@@|com.handmade.memory-audit|" -e "s|@@SCRIPT@@|$S2/memory-audi
   "$REPO/core/skills/memory-audit/launchd/memory-audit.plist.template" >"$OLD_PL"
 old_sum="$(shasum -a 256 <"$OLD_PL")"
 touch "$FAKE_LAUNCHD/com.handmade.memory-audit"
+# install.sh の外で weakness-review を登録してある状態（台帳に載っていない）も、同じくラベルを引き継ぐ。
+OLD_WR="$AG/com.handmade.weakness-review.plist"
+sed -e "s|@@LABEL@@|com.handmade.weakness-review|" -e "s|@@SCRIPT@@|$S2/weakness-review/scripts/run.sh|" -e "s|@@HOME@@|$HOME|g" \
+  "$REPO/core/skills/weakness-review/launchd/weakness-review.plist.template" >"$OLD_WR"
+touch "$FAKE_LAUNCHD/com.handmade.weakness-review"
 : >"$CALLS"
 out="$("$REPO/install.sh" --with-schedule </dev/null 2>&1)"
 rc=$?
 check "終了コード0" '[ "$rc" -eq 0 ]'
 check "既存のラベルを引き継ぐ（二重に登録しない）" '[ ! -e "$AG/$U.memory-audit.plist" ] && [ "$(px "$OLD_PL" Label)" = "com.handmade.memory-audit" ] && has "既存のラベルを引き継ぎます: com.handmade.memory-audit"'
-check "引き継いだ plist を書き換え、bootout してから bootstrap する" '[ "$(px "$OLD_PL" StandardOutPath)" = "$HOME/.local/state/claude-reports/memory-audit/launchd.stdout.log" ] && [ "$(grep "handmade" "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
+check "引き継いだ plist を書き換え、bootout してから bootstrap する" '[ "$(px "$OLD_PL" StandardOutPath)" = "$HOME/.local/state/claude-reports/memory-audit/launchd.stdout.log" ] && [ "$(grep "handmade.memory-audit" "$CALLS" | grep "^launchctl boot" | cut -d" " -f2 | tr "\n" " ")" = "bootout bootstrap " ]'
 bk="$(ls "$HOME/.local/state/claude-review-inbox/plist-backup/"*/com.handmade.memory-audit.plist 2>/dev/null | head -1)"
 check "書き換える前の plist を複製する" '[ -n "$bk" ] && [ "$(shasum -a 256 <"$bk")" = "$old_sum" ]'
 check "台帳に引き継ぎの印をつける" 'grep -q "^memory-audit	com.handmade.memory-audit	$OLD_PL	1$" "$JOBS"'
+
+check "weakness-review: 既存のラベルを引き継ぐ（二重に登録しない）" '[ ! -e "$AG/$U.weakness-review.plist" ] && [ "$(px "$OLD_WR" Label)" = "com.handmade.weakness-review" ] && has "既存のラベルを引き継ぎます: com.handmade.weakness-review"'
+check "weakness-review: 台帳に引き継ぎの印をつける" 'grep -q "^weakness-review	com.handmade.weakness-review	$OLD_WR	1$" "$JOBS"'
 
 echo "== 旧版の review-loop の後始末"
 OLD_LOOP="$AG/$U.review-loop.plist"

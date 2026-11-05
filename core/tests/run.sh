@@ -25,7 +25,7 @@ run_test() {
   local name="$1" rc miss f
   shift
   for f in "$@"; do
-    case "$f" in */test_*.sh|*/test_*.py)
+    case "$f" in */test_*.sh|*/test_*.py|*/scripts/test.sh)
       miss="$(missing_skills "$f")"
       if [ -n "$miss" ]; then
         results+=("SKIP ${name}（無いスキル: ${miss}）")
@@ -54,6 +54,7 @@ run_test "core: 消える記述の行き先" bash "$TESTS_DIR/test_destinations.
 run_test "core: 訂正リスト" bash "$TESTS_DIR/test_corrections.sh"
 run_test "core: 書き換えを拒否する規則（南京錠）" bash "$TESTS_DIR/test_guard_rules.sh"
 run_test "core: 変更の台帳と会話の開始時の知らせ" bash "$TESTS_DIR/test_ledger.sh"
+run_test "core: 弱点の見直しの起動" bash "$TESTS_DIR/test_weakness_review.sh"
 [ -f "$REPO/core/skills/memory-audit/scripts/test-tag.sh" ] &&
   run_test "skill: memory-audit の作成したリポジトリの記録" bash "$REPO/core/skills/memory-audit/scripts/test-tag.sh"
 for t in "$REPO"/core/skills/*/scripts/test.sh; do

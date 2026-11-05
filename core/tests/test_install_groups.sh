@@ -1,7 +1,7 @@
 #!/bin/bash
-# requires: report-inbox change-review memory-audit feedback-mining skill-audit repo-patrol secret-patrol skill-updates
-# install.sh を公開版の組（tools/groups.tsv の notify・review・patrol）ごとの写しで動かし、その組のスキルの分だけを
-# 入れ・外すことを確かめる。3つを同じ HOME に入れ、1つを外しても他の組のフックと定期実行が残ることも確かめる。
+# requires: report-inbox change-review memory-audit feedback-mining skill-audit repo-patrol secret-patrol skill-updates weakness-review
+# install.sh を公開版の組（tools/groups.tsv の report-inbox・review・patrol・weakness-review）ごとの写しで動かし、その組のスキルの分だけを
+# 入れ・外すことを確かめる。4つを同じ HOME に入れ、1つを外しても他の組のフックと定期実行が残ることも確かめる。
 # 一時の HOME と偽の launchctl で動かし、本物の HOME・launchctl には触れない（2026-11-04）。
 set -u
 
@@ -56,9 +56,10 @@ make_copy() {
   done
   printf '%s\n' "$d"
 }
-NOTIFY="$(make_copy notify)"
+NOTIFY="$(make_copy report-inbox)"
 REVIEW="$(make_copy review)"
 PATROL="$(make_copy patrol)"
+WEAKNESS="$(make_copy weakness-review)"
 
 new_home() {
   export HOME="$WORK/home-$1"
@@ -85,6 +86,7 @@ check "定期実行を登録しない" '[ -z "$(jobs)" ]'
 check "見回りの範囲を書かない" '[ ! -e "$HOME/$CONF_REL" ]'
 check "記録の置き場所を作らない" '[ ! -e "$HOME/.local/state/claude-reports/changes" ] && [ ! -e "$HOME/claude-reports/proposals" ]'
 check "週1回の見直しを聞かない・claude の行を出さない" '! printf "%s" "$out" | grep -q "週1回の見直し"'
+check "change-review が無ければ件数が出るとは案内しない" '! printf "%s" "$out" | grep -q "件数が出ます" && printf "%s" "$out" | grep -q "定期実行の結果と失敗は会話の開始時に知らせます"'
 
 echo "== 見直しの組"
 new_home review
@@ -106,19 +108,42 @@ check "フックは見回りの3つ" '[ "$(hooks)" = "repo-patrol/scripts/run-if
 check "--with-schedule でも定期実行を登録しない" '[ -z "$(jobs)" ]'
 check "見回りの範囲を書く" '[ -f "$HOME/$CONF_REL" ]'
 
-echo "== 3つを同じ HOME に入れて、1つずつ外す"
+echo "== 弱点の見直しの組"
+new_home weakness
+out="$("$WEAKNESS/install.sh" --yes --with-schedule </dev/null 2>&1)"; rc=$?
+check "終了コード0" '[ "$rc" -eq 0 ]'
+check "weakness-review だけを置く" '[ "$(links)" = "weakness-review" ]'
+check "フックを足さない" '[ -z "$(hooks)" ]'
+check "週1回の見直しは weakness-review だけを登録する" '[ "$(jobs)" = "weakness-review" ]'
+check "見回りの範囲を書かない" '[ ! -e "$HOME/$CONF_REL" ]'
+"$WEAKNESS/install.sh" --uninstall </dev/null >/dev/null 2>&1; rc=$?
+check "外す: すべて消える" '[ "$rc" -eq 0 ] && [ -z "$(links)" ] && [ -z "$(jobs)" ]'
+
+echo "== change-review が要るスキルを1つだけ入れる"
+MA="$(make_copy memory-audit)"
+CR="$(make_copy change-review)"
+new_home memory-audit
+out="$("$MA/install.sh" --yes --no-schedule </dev/null 2>&1)"; rc=$?
+check "change-review が無ければ注意を出す（終了コード0）" '[ "$rc" -eq 0 ] && printf "%s" "$out" | grep -q "memory-audit は change-review が無いと動きません"'
+"$CR/install.sh" --yes </dev/null >/dev/null 2>&1
+out="$("$MA/install.sh" --yes --no-schedule </dev/null 2>&1)"
+check "change-review を入れてあれば注意を出さない" '! printf "%s" "$out" | grep -q "change-review が無いと動きません"'
+
+echo "== 4つを同じ HOME に入れて、1つずつ外す"
 new_home all
-for r in "$NOTIFY" "$REVIEW" "$PATROL"; do "$r/install.sh" --yes --with-schedule </dev/null >/dev/null 2>&1; done
-check "8つのスキルを置く" '[ "$(links | wc -w | tr -d " ")" = 8 ]'
+for r in "$NOTIFY" "$REVIEW" "$PATROL" "$WEAKNESS"; do "$r/install.sh" --yes --with-schedule </dev/null >/dev/null 2>&1; done
+check "9つのスキルを置く" '[ "$(links | wc -w | tr -d " ")" = 9 ]'
 check "4つのフックを足す" '[ "$(hooks | wc -w | tr -d " ")" = 4 ]'
-check "定期実行は3つ" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit" ]'
+check "定期実行は4つ" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit weakness-review" ]'
 "$PATROL/install.sh" --uninstall </dev/null >/dev/null 2>&1; rc=$?
 check "見回りを外す: 終了コード0" '[ "$rc" -eq 0 ]'
-check "見回りを外す: 他の組のスキルは残る" '[ "$(links)" = "change-review feedback-mining memory-audit report-inbox skill-audit" ]'
+check "見回りを外す: 他の組のスキルは残る" '[ "$(links)" = "change-review feedback-mining memory-audit report-inbox skill-audit weakness-review" ]'
 check "見回りを外す: 知らせのフックは残る" '[ "$(hooks)" = "report-inbox/scripts/unread.sh" ]'
-check "見回りを外す: 見直しの定期実行は残る" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit" ]'
+check "見回りを外す: 見直しの定期実行は残る" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit weakness-review" ]'
 "$NOTIFY/install.sh" --uninstall </dev/null >/dev/null 2>&1
-check "知らせを外す: 見直しの定期実行は残る" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit" ] && [ -z "$(hooks)" ]'
+check "知らせを外す: 見直しの定期実行は残る" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit weakness-review" ] && [ -z "$(hooks)" ]'
+"$WEAKNESS/install.sh" --uninstall </dev/null >/dev/null 2>&1
+check "弱点の見直しを外す: 他の定期実行は残る" '[ "$(jobs)" = "feedback-mining memory-audit skill-audit" ] && [ "$(links)" = "change-review feedback-mining memory-audit skill-audit" ]'
 "$REVIEW/install.sh" --uninstall </dev/null >/dev/null 2>&1
 check "見直しを外す: すべて消える" '[ -z "$(links)" ] && [ -z "$(hooks)" ] && [ -z "$(jobs)" ]'
 

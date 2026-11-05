@@ -1,4 +1,5 @@
 #!/bin/bash
+# requires: change-review
 # feedback-mining scripts の検査。一時ディレクトリに偽の会話の履歴を作って実行する。実際の claude は起動しない。
 set -u
 # 2つ目の設定ディレクトリの名前。利用者の環境の名前を書かないよう、中立な名前を変数で持つ。
